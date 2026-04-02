@@ -562,6 +562,54 @@ test("manual-test: COMPLETE transitions to commit on <transition>commit</transit
     assert.deepEqual(decision.activeTaskTarget, {type: "root"});
 });
 
+test("manual-test: implement transition requires manual-test subtasks", () => {
+    const decision = transition(makeSnapshot("manual-test"), complete("manual-test", "<transition>implement</transition>"));
+
+    expectKind(decision, "rejected");
+    assert.equal(
+        decision.reason,
+        "Got <transition>implement</transition> but no <manual-test-subtasks> block",
+    );
+});
+
+test("manual-test: implement transition creates root subtasks and moves to implement", () => {
+    const decision = transition(
+        makeSnapshot("manual-test"),
+        complete(
+            "manual-test",
+            `
+<manual-test-subtasks>
+- title: Fix broken save flow
+  description: Restore successful save after manual repro
+- title: Update verification steps
+  tdd: false
+</manual-test-subtasks>
+<transition>implement</transition>
+`,
+        ),
+    );
+
+    expectKind(decision, "applied");
+    assert.equal(decision.state, "implement");
+    assert.deepEqual(decision.activeTaskTarget, {type: "first-created-child", parentTaskId: ROOT});
+    assert.deepEqual(decision.effects, [
+        {
+            type: "CREATE_ISSUE",
+            parentTaskId: ROOT,
+            title: "Fix broken save flow",
+            description: "Restore successful save after manual repro",
+            idempotencyKey: `${ROOT}::Fix broken save flow`,
+        },
+        {
+            type: "CREATE_ISSUE",
+            parentTaskId: ROOT,
+            title: "Update verification steps",
+            description: "",
+            idempotencyKey: `${ROOT}::Update verification steps`,
+        },
+    ]);
+});
+
 test("commit: requires commit message", () => {
     const decision = transition(makeSnapshot("commit"), complete("commit", "no commit message"));
 

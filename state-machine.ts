@@ -141,6 +141,7 @@ export type TransitionDecision =
 export interface ParsedAssistantOutput {
     requestedState: WorkflowState | null;
     reviewFindings: IssueDraft[];
+    manualTestSubtasks: IssueDraft[];
     commitMessage: string | null;
 }
 
@@ -156,15 +157,24 @@ export function parseAssistantOutput(
     const reviewFindingsResult = shouldParseReviewFindings
         ? parseIssueDraftListFromTag(message, "review-findings")
         : null;
+    const shouldParseManualTestSubtasks = state === "manual-test";
+    const manualTestSubtasksResult = shouldParseManualTestSubtasks
+        ? parseIssueDraftListFromTag(message, "manual-test-subtasks")
+        : null;
 
     if (reviewFindingsResult && "error" in reviewFindingsResult) {
         return {error: reviewFindingsResult.error};
+    }
+
+    if (manualTestSubtasksResult && "error" in manualTestSubtasksResult) {
+        return {error: manualTestSubtasksResult.error};
     }
 
     return {
         parsed: {
             requestedState: parseRequestedStateFromAssistantMessage(message),
             reviewFindings: reviewFindingsResult ? reviewFindingsResult.drafts : [],
+            manualTestSubtasks: manualTestSubtasksResult ? manualTestSubtasksResult.drafts : [],
             commitMessage: parseCommitMessageFromAssistantMessage(message),
         },
     };
@@ -196,7 +206,8 @@ export function canReplayCompleteFromAssistantMessage(
                 || (parsed.requestedState === "implement-review" && parsed.reviewFindings.length > 0);
 
         case "manual-test":
-            return parsed.requestedState === "commit";
+            return parsed.requestedState === "commit"
+                || (parsed.requestedState === "implement" && parsed.manualTestSubtasks.length > 0);
 
         case "subtask-commit":
         case "commit":
@@ -477,8 +488,28 @@ export function transition(snapshot: WorkflowSnapshot, event: WorkflowEvent): Tr
                 case "commit":
                     return move(snapshot, "commit", {type: "root"});
 
+                case "implement":
+                    if (parsed.manualTestSubtasks.length === 0) {
+                        return error(
+                            snapshot,
+                            event,
+                            "Got <transition>implement</transition> but no <manual-test-subtasks> block",
+                        );
+                    }
+
+                    return move(
+                        snapshot,
+                        "implement",
+                        {type: "first-created-child", parentTaskId: snapshot.rootTaskId},
+                        toCreateIssueEffects(snapshot.rootTaskId, parsed.manualTestSubtasks),
+                    );
+
                 default:
-                    return error(snapshot, event, "Expected <transition>commit</transition>");
+                    return error(
+                        snapshot,
+                        event,
+                        "Expected <transition>commit</transition> or manual-test subtasks + <transition>implement</transition>",
+                    );
             }
         }
 
@@ -589,11 +620,14 @@ function parsePlanSubtasksFromRootIssueMarkdown(rootIssueMarkdown?: string): Dra
     return parseYamlIssueList(yaml, "Subtask");
 }
 
-function parseIssueDraftListFromTag(text: string, tagName: "review-findings"): DraftListParseResult | null {
+function parseIssueDraftListFromTag(
+    text: string,
+    tagName: "review-findings" | "manual-test-subtasks",
+): DraftListParseResult | null {
     const yamlString = extractTaggedYamlBlock(text, tagName);
     if (!yamlString) return null;
 
-    return parseYamlIssueList(yamlString, "Finding");
+    return parseYamlIssueList(yamlString, tagName === "review-findings" ? "Finding" : "Subtask");
 }
 
 function parseYamlIssueList(yamlString: string, label: string): DraftListParseResult {

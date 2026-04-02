@@ -106,6 +106,115 @@ export function shouldNotifyPendingTransitionOutsideTaskLoop(params: {
     return canReplayCompleteFromAssistantMessage(params.workflowState, params.latestAssistantMessageText);
 }
 
+export function findPendingPromptRunCompletionCandidate(params: {
+    branch: Array<{type?: string; id?: unknown; message?: unknown}>;
+    pendingPromptRun?: PendingPromptRun | null;
+    workflowState: MachineWorkflowState;
+    activeTaskId: string;
+    sessionLeafId: string;
+    lastConsumedAssistantId?: string | null;
+}): {assistantMessageId: string; assistantMessage: string; hadErrors: boolean} | null {
+    const pending = params.pendingPromptRun ?? null;
+    if (!pending) return null;
+    if (pending.state !== params.workflowState) return null;
+    if (pending.active_task_id !== params.activeTaskId) return null;
+    if (pending.session_leaf_id !== params.sessionLeafId) return null;
+
+    const previousAssistantId = pending.previous_assistant_id ?? null;
+    if (!previousAssistantId) {
+        return null;
+    }
+
+    const previousAssistantIndex = params.branch.findIndex((entry) => entry.type === "message" && entry.id === previousAssistantId);
+    if (previousAssistantIndex < 0) {
+        return null;
+    }
+
+    let promptUserIndex = -1;
+    for (let i = previousAssistantIndex + 1; i < params.branch.length; i++) {
+        const entry = params.branch[i];
+        if (entry.type !== "message") continue;
+        const message = entry.message as {role?: unknown} | undefined;
+        if (message?.role === "user") {
+            promptUserIndex = i;
+            break;
+        }
+    }
+    if (promptUserIndex < 0) {
+        return null;
+    }
+
+    let nextUserIndex = params.branch.length;
+    for (let i = promptUserIndex + 1; i < params.branch.length; i++) {
+        const entry = params.branch[i];
+        if (entry.type !== "message") continue;
+        const message = entry.message as {role?: unknown} | undefined;
+        if (message?.role === "user") {
+            nextUserIndex = i;
+            break;
+        }
+    }
+
+    let candidate: {assistantMessageId: string; assistantMessage: string; hadErrors: boolean} | null = null;
+    let sawToolError = false;
+
+    for (let i = promptUserIndex + 1; i < nextUserIndex; i++) {
+        const entry = params.branch[i];
+        if (entry.type !== "message") continue;
+        const message = entry.message as {
+            role?: unknown;
+            content?: unknown;
+            stopReason?: unknown;
+            errorMessage?: unknown;
+            isError?: unknown;
+        } | undefined;
+        if (!message) continue;
+
+        if (message.role === "toolResult") {
+            if (message.isError === true) {
+                sawToolError = true;
+            }
+            continue;
+        }
+
+        if (message.role !== "assistant") {
+            continue;
+        }
+
+        if (
+            message.stopReason === "error"
+            || message.stopReason === "aborted"
+            || typeof message.errorMessage === "string"
+        ) {
+            return null;
+        }
+
+        if (message.stopReason === "toolUse") {
+            continue;
+        }
+
+        if (typeof entry.id !== "string" || !entry.id.trim()) {
+            continue;
+        }
+
+        candidate = {
+            assistantMessageId: entry.id,
+            assistantMessage: extractMessageText(message.content),
+            hadErrors: sawToolError,
+        };
+    }
+
+    if (!candidate) {
+        return null;
+    }
+
+    if ((params.lastConsumedAssistantId ?? null) === candidate.assistantMessageId) {
+        return null;
+    }
+
+    return candidate;
+}
+
 export function completionReadyToMergeNotice(params: {
     changed: boolean;
     nextState: MachineWorkflowState;
@@ -447,6 +556,14 @@ type PendingEmptySubtaskCommit = {
     commit_message: string;
 };
 
+type PendingPromptRun = {
+    state: MachineWorkflowState;
+    active_task_id: string;
+    session_leaf_id: string;
+    previous_assistant_id?: string | null;
+    started_at: string;
+};
+
 type PersistedWorkflow = TaskNode & {
     schema_version: number;
     state: MachineWorkflowState;
@@ -455,6 +572,7 @@ type PersistedWorkflow = TaskNode & {
     session_leaf_id: string;
     session_file_path?: string | null;
     last_consumed_assistant_id?: string | null;
+    pending_prompt_run?: PendingPromptRun | null;
     pending_empty_subtask_commit?: PendingEmptySubtaskCommit | null;
     version: number;
     updated_at: string;
@@ -543,6 +661,9 @@ function cloneWorkflow(workflow: PersistedWorkflow): PersistedWorkflow {
         session_leaf_id: workflow.session_leaf_id,
         session_file_path: workflow.session_file_path ?? null,
         last_consumed_assistant_id: workflow.last_consumed_assistant_id ?? null,
+        pending_prompt_run: workflow.pending_prompt_run
+            ? {...workflow.pending_prompt_run}
+            : null,
         pending_empty_subtask_commit: workflow.pending_empty_subtask_commit
             ? {...workflow.pending_empty_subtask_commit}
             : null,
@@ -664,6 +785,31 @@ function validateWorkflow(workflow: PersistedWorkflow): string | null {
     }
 
     if (
+        workflow.pending_prompt_run !== undefined
+        && workflow.pending_prompt_run !== null
+        && (
+            !isObject(workflow.pending_prompt_run)
+            || !isWorkflowState(String(workflow.pending_prompt_run.state))
+            || typeof workflow.pending_prompt_run.active_task_id !== "string"
+            || !workflow.pending_prompt_run.active_task_id.trim()
+            || typeof workflow.pending_prompt_run.session_leaf_id !== "string"
+            || !workflow.pending_prompt_run.session_leaf_id.trim()
+            || (
+                workflow.pending_prompt_run.previous_assistant_id !== undefined
+                && workflow.pending_prompt_run.previous_assistant_id !== null
+                && (
+                    typeof workflow.pending_prompt_run.previous_assistant_id !== "string"
+                    || !workflow.pending_prompt_run.previous_assistant_id.trim()
+                )
+            )
+            || typeof workflow.pending_prompt_run.started_at !== "string"
+            || !workflow.pending_prompt_run.started_at.trim()
+        )
+    ) {
+        return "workflow.pending_prompt_run must be null/undefined or {state, active_task_id, session_leaf_id, previous_assistant_id?, started_at}";
+    }
+
+    if (
         workflow.pending_empty_subtask_commit !== undefined
         && workflow.pending_empty_subtask_commit !== null
         && (
@@ -726,6 +872,7 @@ function createInitialWorkflow(rootTaskId: string, rootTitle: string, sessionLea
         session_leaf_id: sessionLeafId,
         session_file_path: null,
         last_consumed_assistant_id: null,
+        pending_prompt_run: null,
         pending_empty_subtask_commit: null,
         version: 1,
         updated_at: now,
@@ -1114,6 +1261,44 @@ function persistConsumedAssistantMessageId(
     return {workflow: updated};
 }
 
+function pendingPromptRunsEqual(a: PendingPromptRun | null | undefined, b: PendingPromptRun | null | undefined): boolean {
+    if (!a && !b) return true;
+    if (!a || !b) return false;
+    return a.state === b.state
+        && a.active_task_id === b.active_task_id
+        && a.session_leaf_id === b.session_leaf_id
+        && (a.previous_assistant_id ?? null) === (b.previous_assistant_id ?? null)
+        && a.started_at === b.started_at;
+}
+
+function persistPendingPromptRun(
+    root: string,
+    workflow: PersistedWorkflow,
+    pendingPromptRun: PendingPromptRun | null,
+): {workflow: PersistedWorkflow} | {error: string} {
+    const normalized = pendingPromptRun
+        ? {
+            ...pendingPromptRun,
+            previous_assistant_id: pendingPromptRun.previous_assistant_id ?? null,
+        }
+        : null;
+
+    if (pendingPromptRunsEqual(workflow.pending_prompt_run ?? null, normalized)) {
+        return {workflow};
+    }
+
+    const updated = cloneWorkflow(workflow);
+    updated.pending_prompt_run = normalized;
+    updated.updated_at = new Date().toISOString();
+
+    const saved = saveWorkflowAtomic(root, updated);
+    if (saved.ok === false) {
+        return {error: saved.error};
+    }
+
+    return {workflow: updated};
+}
+
 function persistSessionFilePath(
     root: string,
     workflow: PersistedWorkflow,
@@ -1142,23 +1327,48 @@ async function replayPendingAssistantTransition(
     root: string,
     workflow: PersistedWorkflow,
 ): Promise<{changed: boolean; workflow: PersistedWorkflow} | {error: string}> {
-    const latest = getLastAssistantMessage(ctx);
-    if (!latest || !latest.id) {
-        return {changed: false, workflow};
+    const pendingCandidate = findPendingPromptRunCompletionCandidate({
+        branch: ctx.sessionManager.getBranch(),
+        pendingPromptRun: workflow.pending_prompt_run ?? null,
+        workflowState: workflow.state,
+        activeTaskId: workflow.active_task_id,
+        sessionLeafId: workflow.session_leaf_id,
+        lastConsumedAssistantId: workflow.last_consumed_assistant_id ?? null,
+    });
+
+    let assistantMessageId: string | null = pendingCandidate?.assistantMessageId ?? null;
+    let assistantMessage = pendingCandidate?.assistantMessage ?? null;
+    const replayingAfterErrors = pendingCandidate?.hadErrors === true;
+
+    if (!assistantMessageId || assistantMessage === null) {
+        const latest = getLastAssistantMessage(ctx);
+        if (!latest || !latest.id) {
+            return {changed: false, workflow};
+        }
+
+        if (workflow.last_consumed_assistant_id === latest.id) {
+            return {changed: false, workflow};
+        }
+
+        if (!canReplayCompleteFromAssistantMessage(workflow.state, latest.text)) {
+            return {changed: false, workflow};
+        }
+
+        assistantMessageId = latest.id;
+        assistantMessage = latest.text;
     }
 
-    if (workflow.last_consumed_assistant_id === latest.id) {
-        return {changed: false, workflow};
-    }
-
-    if (!canReplayCompleteFromAssistantMessage(workflow.state, latest.text)) {
-        return {changed: false, workflow};
+    if (replayingAfterErrors) {
+        ctx.ui.notify(
+            "The previous /task run reported tool errors, but the agent later produced a completion. Replaying that completion now.",
+            "warning",
+        );
     }
 
     if (ENABLE_TRANSITION_DEBUG) {
-        const preview = latest.text.replace(/\s+/g, " ").slice(0, 180);
+        const preview = assistantMessage.replace(/\s+/g, " ").slice(0, 180);
         ctx.ui.notify(
-            `transition-replay: attempting COMPLETE from assistant ${latest.id} in state ${workflow.state}`,
+            `transition-replay: attempting COMPLETE from assistant ${assistantMessageId} in state ${workflow.state}`,
             "info",
         );
         ctx.ui.notify(`transition-replay: assistant-preview: ${preview}`, "info");
@@ -1172,7 +1382,7 @@ async function replayPendingAssistantTransition(
         {
             type: "COMPLETE",
             completedState: workflow.state,
-            assistantMessage: latest.text,
+            assistantMessage,
             rootIssueMarkdown: "",
         },
     );
@@ -1181,14 +1391,19 @@ async function replayPendingAssistantTransition(
         return {error: transition.error};
     }
 
-    const consumed = persistConsumedAssistantMessageId(root, transition.workflow, latest.id);
+    const consumed = persistConsumedAssistantMessageId(root, transition.workflow, assistantMessageId);
     if ("error" in consumed) {
         return {error: consumed.error};
     }
 
+    const clearedPending = persistPendingPromptRun(root, consumed.workflow, null);
+    if ("error" in clearedPending) {
+        return {error: clearedPending.error};
+    }
+
     const completionNotice = completionReadyToMergeNotice({
         changed: transition.changed,
-        nextState: consumed.workflow.state,
+        nextState: clearedPending.workflow.state,
     });
     if (completionNotice) {
         ctx.ui.notify(completionNotice, "info");
@@ -1203,7 +1418,7 @@ async function replayPendingAssistantTransition(
 
     return {
         changed: transition.changed,
-        workflow: consumed.workflow,
+        workflow: clearedPending.workflow,
     };
 }
 
@@ -1880,8 +2095,16 @@ async function maybeNotifyPendingTransitionOutsideTaskLoop(
 
     const workflow = loaded.workflow;
     const latest = getLastAssistantMessage(ctx);
+    const pendingCandidate = findPendingPromptRunCompletionCandidate({
+        branch: ctx.sessionManager.getBranch(),
+        pendingPromptRun: workflow.pending_prompt_run ?? null,
+        workflowState: workflow.state,
+        activeTaskId: workflow.active_task_id,
+        sessionLeafId: workflow.session_leaf_id,
+        lastConsumedAssistantId: workflow.last_consumed_assistant_id ?? null,
+    });
 
-    const shouldNotify = shouldNotifyPendingTransitionOutsideTaskLoop({
+    const shouldNotify = pendingCandidate !== null || shouldNotifyPendingTransitionOutsideTaskLoop({
         workflowState: workflow.state,
         latestAssistantMessageId: latest?.id ?? null,
         latestAssistantMessageText: latest?.text ?? "",
@@ -2529,6 +2752,19 @@ async function runTaskWorkspace(
             );
         }
 
+        const withPendingPromptRun = persistPendingPromptRun(root, workflow, {
+            state: workflow.state,
+            active_task_id: workflow.active_task_id,
+            session_leaf_id: workflow.session_leaf_id,
+            previous_assistant_id: previousAssistantId,
+            started_at: new Date().toISOString(),
+        });
+        if ("error" in withPendingPromptRun) {
+            ctx.ui.notify(withPendingPromptRun.error, "error");
+            return;
+        }
+        workflow = withPendingPromptRun.workflow;
+
         const ran = await runTaskPrompt(pi, ctx, fullMessage);
         if (!ran) {
             return;
@@ -2570,15 +2806,21 @@ async function runTaskWorkspace(
             return;
         }
 
+        const clearedPending = persistPendingPromptRun(root, consumed.workflow, null);
+        if ("error" in clearedPending) {
+            ctx.ui.notify(clearedPending.error, "error");
+            return;
+        }
+
         const completionNotice = completionReadyToMergeNotice({
             changed: transition.changed,
-            nextState: consumed.workflow.state,
+            nextState: clearedPending.workflow.state,
         });
         if (completionNotice) {
             ctx.ui.notify(completionNotice, "info");
         }
 
-        const shouldContinue = transition.changed && consumed.workflow.state !== "complete";
+        const shouldContinue = transition.changed && clearedPending.workflow.state !== "complete";
 
         if (ENABLE_TRANSITION_DEBUG) {
             ctx.ui.notify(
@@ -2588,7 +2830,7 @@ async function runTaskWorkspace(
         }
 
         if (!shouldContinue) {
-            if (consumed.workflow.state === "manual-test") {
+            if (clearedPending.workflow.state === "manual-test") {
                 ctx.ui.notify("Manual verification is still in progress. When it is complete, have the agent emit <transition>commit</transition> and then run /task again.", "info");
             }
             return;

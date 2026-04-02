@@ -17,13 +17,15 @@ code diff) for production readiness.
 
 ## Issue editing rules (critical)
 
-- If plan changes are needed, update the **root issue sections** via `task_issue_edit`:
+- In `review-plan`, do not update the root issue immediately when you find plan problems.
+- First, present the findings as a short actionable list and wait for the user's decision.
+- If the user approves incorporating some or all of the findings, update the **root issue sections** via `task_issue_edit`:
   - `target: "root"`
   - `action: "upsert_section"`
   - `section: "plan"` and/or `section: "manual_test_plan"`
 - Do not ask the user to manually edit issue contents.
 - Workflow transitions are extension-controlled.
-- If the user explicitly wants to proceed despite findings, they can run `/task lgtm`.
+- If the user explicitly wants to proceed without incorporating any of the findings, treat those findings as waived for this review pass.
 
 ## Review Checklist
 
@@ -72,8 +74,11 @@ code diff) for production readiness.
 ## Output requirements
 
 - If you have **no important, concrete, actionable** findings and you are not missing any information: output `<transition>implement</transition>`.
-- If you have findings: present them as a short list (format below).
-- If findings were addressed and you updated the root issue plan content, emit `<transition>review-plan</transition>` to request another review pass.
+- If you have findings and the user has **not yet approved** changes: present them as a short list and stop. Do **not** emit a transition yet.
+- If the user approves incorporating some or all of the findings:
+  - update the root issue plan content via `task_issue_edit`
+  - emit `<transition>review-plan</transition>` to request another review pass
+- If the user explicitly says all findings are not required / should be waived for this task, emit `<transition>implement</transition>`.
 - If anything is unclear or you need a user decision/constraint: ask **one** clarifying question and stop (do **not** emit a transition yet).
 
 ### Findings format (when needed)
@@ -84,13 +89,17 @@ For each finding:
 - Explain **why** it matters
 - Specify exactly **what to change** in the plan
 
-If the user agrees with your findings, update the plan in the root issue accordingly.
+If the user approves incorporating your findings, update the plan in the root issue accordingly. Until then, only report the findings.
 
 ## Critical Rules
 
-- Emit `<transition>implement</transition>` only when there are no important findings **and** no open questions
-- Emit `<transition>review-plan</transition>` only after findings have been addressed and the plan was updated for another review pass
-- Otherwise: either ask one clarifying question, or list actionable findings
-- Be specific (reference subtask titles / quoted text; avoid vague advice)
-- Explain WHY issues matter
-- No nitpicks or bike shedding
+- Emit `<transition>implement</transition>` only when:
+  - there are no important findings, or
+  - the user has explicitly approved proceeding without addressing any of the findings.
+- Emit `<transition>review-plan</transition>` only after:
+  - the user approved incorporating some or all of the findings, and
+  - you updated the root issue plan content
+- If important findings exist and the user has not yet approved any change, do not emit a transition.
+- Be specific (reference subtask titles / quoted text; avoid vague advice).
+- Explain why each issue matters.
+- No nitpicks or bike shedding.

@@ -49,4 +49,39 @@ request workflow transition by outputting:
 
 `<transition>commit</transition>`
 
+If manual testing finds follow-up implementation work:
+
+1. Update the root issue's `## Manual Verification` section with a concise failure summary and repro notes.
+2. Output a `<manual-test-subtasks>...</manual-test-subtasks>` block containing a YAML list of subtask objects using the same schema as plan subtasks:
+   - `title`: single-line string
+   - `description`: multi-line markdown string
+   - `tdd`: optional boolean (defaults to `true`)
+3. Then output `<transition>implement</transition>`.
+
+Example:
+
+```md
+<manual-test-subtasks>
+- title: Fix broken save flow found in manual testing
+  description: |
+    Repro during manual verification:
+    - Open the editor
+    - Click Save
+    - Observe the request fails with HTTP 500
+
+    Expected:
+    - Save succeeds and shows a success toast
+
+    Follow-up work:
+    - Restore the save handler behavior
+    - Add/adjust automated coverage for the failing path
+- title: Update manual verification steps for save success
+  tdd: false
+  description: |
+    Extend the root manual test plan to cover the corrected save flow and expected UI confirmation.
+</manual-test-subtasks>
+<transition>implement</transition>
+```
+
+After follow-up fixes are implemented, manual verification should be run again from the top.
 Do not proceed as passed if any manual test fails.

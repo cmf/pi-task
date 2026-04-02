@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
     buildTaskBranchRevsetFromTaskHeadCommit,
     completionReadyToMergeNotice,
+    findPendingPromptRunCompletionCandidate,
     inProgressRootIssueIdFromWorkflow,
     normalizeSessionFilePath,
     parseOriginRemoteUrlFromJjGitRemoteListOutput,
@@ -127,6 +128,117 @@ test("shouldNotifyPendingTransitionOutsideTaskLoop returns true for manual-test 
         }),
         true,
     );
+});
+
+test("findPendingPromptRunCompletionCandidate returns the terminal assistant for an implement-review prompt run", () => {
+    const candidate = findPendingPromptRunCompletionCandidate({
+        branch: [
+            {type: "message", id: "a-prev", message: {role: "assistant", content: "previous", stopReason: "stop"}},
+            {type: "message", id: "u-task", message: {role: "user", content: "task prompt"}},
+            {type: "message", id: "a-tool", message: {role: "assistant", content: "working", stopReason: "toolUse"}},
+            {type: "message", id: "tr-ok", message: {role: "toolResult", isError: false, content: "ok"}},
+            {type: "message", id: "a-final", message: {role: "assistant", content: "implemented", stopReason: "stop"}},
+        ],
+        pendingPromptRun: {
+            state: "implement-review",
+            active_task_id: "19",
+            session_leaf_id: "leaf-1",
+            previous_assistant_id: "a-prev",
+            started_at: "2026-04-03T01:17:30.728Z",
+        },
+        workflowState: "implement-review",
+        activeTaskId: "19",
+        sessionLeafId: "leaf-1",
+        lastConsumedAssistantId: null,
+    });
+
+    assert.deepEqual(candidate, {
+        assistantMessageId: "a-final",
+        assistantMessage: "implemented",
+        hadErrors: false,
+    });
+});
+
+test("findPendingPromptRunCompletionCandidate recovers from tool errors when a terminal assistant message follows", () => {
+    const candidate = findPendingPromptRunCompletionCandidate({
+        branch: [
+            {type: "message", id: "a-prev", message: {role: "assistant", content: "previous", stopReason: "stop"}},
+            {type: "message", id: "u-task", message: {role: "user", content: "task prompt"}},
+            {type: "message", id: "a-tool", message: {role: "assistant", content: "working", stopReason: "toolUse"}},
+            {type: "message", id: "tr-fail", message: {role: "toolResult", isError: true, content: "boom"}},
+            {type: "message", id: "a-final", message: {role: "assistant", content: "implemented", stopReason: "stop"}},
+        ],
+        pendingPromptRun: {
+            state: "implement-review",
+            active_task_id: "19",
+            session_leaf_id: "leaf-1",
+            previous_assistant_id: "a-prev",
+            started_at: "2026-04-03T01:17:30.728Z",
+        },
+        workflowState: "implement-review",
+        activeTaskId: "19",
+        sessionLeafId: "leaf-1",
+        lastConsumedAssistantId: null,
+    });
+
+    assert.deepEqual(candidate, {
+        assistantMessageId: "a-final",
+        assistantMessage: "implemented",
+        hadErrors: true,
+    });
+});
+
+test("findPendingPromptRunCompletionCandidate still rejects assistant error turns", () => {
+    const candidate = findPendingPromptRunCompletionCandidate({
+        branch: [
+            {type: "message", id: "a-prev", message: {role: "assistant", content: "previous", stopReason: "stop"}},
+            {type: "message", id: "u-task", message: {role: "user", content: "task prompt"}},
+            {type: "message", id: "a-fail", message: {role: "assistant", content: "failed", stopReason: "error"}},
+            {type: "message", id: "a-final", message: {role: "assistant", content: "implemented", stopReason: "stop"}},
+        ],
+        pendingPromptRun: {
+            state: "implement-review",
+            active_task_id: "19",
+            session_leaf_id: "leaf-1",
+            previous_assistant_id: "a-prev",
+            started_at: "2026-04-03T01:17:30.728Z",
+        },
+        workflowState: "implement-review",
+        activeTaskId: "19",
+        sessionLeafId: "leaf-1",
+        lastConsumedAssistantId: null,
+    });
+
+    assert.equal(candidate, null);
+});
+
+test("findPendingPromptRunCompletionCandidate ignores later unrelated turns after the prompt run", () => {
+    const candidate = findPendingPromptRunCompletionCandidate({
+        branch: [
+            {type: "message", id: "a-prev", message: {role: "assistant", content: "previous", stopReason: "stop"}},
+            {type: "message", id: "u-task", message: {role: "user", content: "task prompt"}},
+            {type: "message", id: "a-final", message: {role: "assistant", content: "implemented", stopReason: "stop"}},
+            {type: "message", id: "u-later", message: {role: "user", content: "another question"}},
+            {type: "message", id: "a-later", message: {role: "assistant", content: "unrelated", stopReason: "stop"}},
+        ],
+        pendingPromptRun: {
+            state: "implement-review",
+            active_task_id: "19",
+            session_leaf_id: "leaf-1",
+            previous_assistant_id: "a-prev",
+            started_at: "2026-04-03T01:17:30.728Z",
+        },
+        workflowState: "implement-review",
+        activeTaskId: "19",
+        sessionLeafId: "leaf-1",
+        lastConsumedAssistantId: null,
+    });
+
+    assert.deepEqual(candidate, {
+        assistantMessageId: "a-final",
+        assistantMessage: "implemented",
+        hadErrors: false,
+    });
 });
 
 test("completionReadyToMergeNotice returns message when transition changed to complete", () => {

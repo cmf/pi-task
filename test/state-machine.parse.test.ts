@@ -186,6 +186,47 @@ false
     assert.deepEqual(parsed.reviewFindings, []);
 });
 
+test("parseAssistantOutput parses manual-test subtasks YAML in manual-test state", () => {
+    const parsed = expectParsed(parseAssistantOutput(`
+<manual-test-subtasks>
+- title: Fix broken save flow
+  description: Restore successful save after manual repro
+- title: Update verification steps
+  tdd: false
+</manual-test-subtasks>
+<transition>implement</transition>
+`, "manual-test"));
+
+    assert.equal(parsed.requestedState, "implement");
+    assert.deepEqual(parsed.manualTestSubtasks, [
+        {title: "Fix broken save flow", description: "Restore successful save after manual repro", tdd: true},
+        {title: "Update verification steps", description: "", tdd: false},
+    ]);
+});
+
+test("parseAssistantOutput ignores malformed manual-test subtasks outside manual-test state", () => {
+    const parsed = expectParsed(parseAssistantOutput(`
+<manual-test-subtasks>
+- title: [
+</manual-test-subtasks>
+<transition>implement</transition>
+`, "review"));
+
+    assert.equal(parsed.requestedState, "implement");
+    assert.deepEqual(parsed.manualTestSubtasks, []);
+});
+
+test("parseAssistantOutput returns parse errors for malformed manual-test subtasks in manual-test state", () => {
+    const error = expectError(parseAssistantOutput(`
+<manual-test-subtasks>
+- title: [
+</manual-test-subtasks>
+<transition>implement</transition>
+`, "manual-test"));
+
+    assert.match(error, /Failed to parse Subtask YAML block/);
+});
+
 test("eventNeedsRootIssueMarkdown requests root markdown for commit COMPLETE events", () => {
     assert.equal(
         eventNeedsRootIssueMarkdown(makeSnapshot("commit"), completeEvent("commit")),
@@ -224,6 +265,21 @@ test("canReplayCompleteFromAssistantMessage requires findings for review impleme
         canReplayCompleteFromAssistantMessage(
             "review",
             "<review-findings>\n- title: Fix parser\n</review-findings>\n<transition>implement-review</transition>",
+        ),
+        true,
+    );
+});
+
+test("canReplayCompleteFromAssistantMessage requires manual-test subtasks for manual-test implement", () => {
+    assert.equal(
+        canReplayCompleteFromAssistantMessage("manual-test", "<transition>implement</transition>"),
+        false,
+    );
+
+    assert.equal(
+        canReplayCompleteFromAssistantMessage(
+            "manual-test",
+            "<manual-test-subtasks>\n- title: Fix broken save\n</manual-test-subtasks>\n<transition>implement</transition>",
         ),
         true,
     );

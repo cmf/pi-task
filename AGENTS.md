@@ -86,6 +86,7 @@ The extension treats your repo in two modes:
   - move to next root subtask `implement` or root `manual-test`
 - `manual-test`:
   - on assistant output `<transition>commit</transition>`: moves to `commit`
+  - on `<manual-test-subtasks>...</manual-test-subtasks>` + `<transition>implement</transition>`: create/reuse depth-1 subtasks, set first active, move to `implement`
 - `commit`:
   - parse `<commit-message>...</commit-message>`
   - close root task + final `jj commit`
@@ -105,3 +106,19 @@ The extension treats your repo in two modes:
 The extension manages per-task `jj workspace` creation under
 `~/.workspaces/<task-id>/<repo>` and merges completed workspaces back into the
 main workspace as a **single squashed commit** (message defaults to the root ticket title).
+
+## Project-local skill
+
+### `task-workflow`
+
+A packaged skill lives at `skills/task-workflow/SKILL.md`.
+
+Use it when a task workspace is stuck and you need to manually repair or advance
+`.tasks/workflow.json` so `/task` can continue.
+
+The skill covers:
+
+- workflow state/depth rules
+- task tree invariants
+- safe handling of `pending_prompt_run`, `session_leaf_id`, and related fields
+- minimal manual edit procedures for common stuck-workflow cases
