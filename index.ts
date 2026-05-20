@@ -564,6 +564,20 @@ type PendingPromptRun = {
     started_at: string;
 };
 
+export type ManualTestFollowupStatus = "open" | "in_progress" | "closed" | "unknown";
+
+export type ManualTestFollowup = {
+    issue_id: string;
+    title: string;
+    fingerprint: string;
+    created_at: string;
+    from_manual_test_version: number;
+};
+
+export type ManualTestFollowupWithStatus = ManualTestFollowup & {
+    status: ManualTestFollowupStatus;
+};
+
 type PersistedWorkflow = TaskNode & {
     schema_version: number;
     state: MachineWorkflowState;
@@ -574,6 +588,7 @@ type PersistedWorkflow = TaskNode & {
     last_consumed_assistant_id?: string | null;
     pending_prompt_run?: PendingPromptRun | null;
     pending_empty_subtask_commit?: PendingEmptySubtaskCommit | null;
+    manual_test_followups?: ManualTestFollowup[];
     version: number;
     updated_at: string;
     last_transition?: {
@@ -667,6 +682,7 @@ function cloneWorkflow(workflow: PersistedWorkflow): PersistedWorkflow {
         pending_empty_subtask_commit: workflow.pending_empty_subtask_commit
             ? {...workflow.pending_empty_subtask_commit}
             : null,
+        manual_test_followups: (workflow.manual_test_followups ?? []).map((followup) => ({...followup})),
         version: workflow.version,
         updated_at: workflow.updated_at,
         last_transition: workflow.last_transition ? {...workflow.last_transition} : undefined,
@@ -823,6 +839,34 @@ function validateWorkflow(workflow: PersistedWorkflow): string | null {
         return "workflow.pending_empty_subtask_commit must be null/undefined or {task_id, commit_message}";
     }
 
+    if (workflow.manual_test_followups !== undefined) {
+        if (!Array.isArray(workflow.manual_test_followups)) {
+            return "workflow.manual_test_followups must be undefined or an array";
+        }
+        const seenFollowups = new Set<string>();
+        for (const followup of workflow.manual_test_followups) {
+            if (
+                !isObject(followup)
+                || typeof followup.issue_id !== "string"
+                || !followup.issue_id.trim()
+                || typeof followup.title !== "string"
+                || !followup.title.trim()
+                || typeof followup.fingerprint !== "string"
+                || !followup.fingerprint.trim()
+                || typeof followup.created_at !== "string"
+                || !followup.created_at.trim()
+                || !Number.isInteger(followup.from_manual_test_version)
+                || followup.from_manual_test_version < 1
+            ) {
+                return "workflow.manual_test_followups entries must contain issue_id, title, fingerprint, created_at, and from_manual_test_version";
+            }
+            if (seenFollowups.has(followup.fingerprint)) {
+                return `duplicate manual_test_followups fingerprint: ${followup.fingerprint}`;
+            }
+            seenFollowups.add(followup.fingerprint);
+        }
+    }
+
     if (!isWorkflowState(workflow.state)) {
         return `workflow.state is invalid: ${String(workflow.state)}`;
     }
@@ -874,6 +918,7 @@ function createInitialWorkflow(rootTaskId: string, rootTitle: string, sessionLea
         last_consumed_assistant_id: null,
         pending_prompt_run: null,
         pending_empty_subtask_commit: null,
+        manual_test_followups: [],
         version: 1,
         updated_at: now,
         last_transition: {
@@ -982,6 +1027,139 @@ function toWorkflowIssueSummary(issue: GitHubIssueSummary): WorkflowIssueSummary
         created: issue.createdAt,
         parent: issue.parent ? String(issue.parent.number) : null,
     };
+}
+
+function toManualTestFollowupStatus(issue: Pick<GitHubIssueSummary, "state" | "labels">): ManualTestFollowupStatus {
+    return toWorkflowIssueStatus(issue);
+}
+
+export function fingerprintManualTestFollowup(title: string): string {
+    const normalized = title
+        .trim()
+        .toLowerCase()
+        .replace(/[`'"“”‘’]/g, "")
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "");
+    return normalized || "manual-test-followup";
+}
+
+export function recordManualTestFollowups(params: {
+    existing?: ManualTestFollowup[] | null;
+    createdIssues: Array<{issue_id: string; title: string}>;
+    createdAt: string;
+    fromManualTestVersion: number;
+}): ManualTestFollowup[] {
+    const next = (params.existing ?? []).map((followup) => ({...followup}));
+    const seen = new Set(next.map((followup) => followup.fingerprint));
+
+    for (const created of params.createdIssues) {
+        const issueId = created.issue_id.trim();
+        const title = created.title.trim();
+        if (!issueId || !title) {
+            continue;
+        }
+        const fingerprint = fingerprintManualTestFollowup(title);
+        if (seen.has(fingerprint)) {
+            continue;
+        }
+        next.push({
+            issue_id: issueId,
+            title,
+            fingerprint,
+            created_at: params.createdAt,
+            from_manual_test_version: params.fromManualTestVersion,
+        });
+        seen.add(fingerprint);
+    }
+
+    return next;
+}
+
+function formatManualTestFollowupStatus(status: ManualTestFollowupStatus): string {
+    return status.toUpperCase().replace(/_/g, "-");
+}
+
+export function buildManualTestFollowupPromptContext(followups: ManualTestFollowupWithStatus[]): string {
+    if (followups.length === 0) {
+        return "";
+    }
+
+    const lines = [
+        "## Previous Manual-Test Follow-ups",
+        "",
+        ...followups.map((followup) => (
+            `- #${followup.issue_id} ${formatManualTestFollowupStatus(followup.status)}: ${followup.title}`
+        )),
+        "",
+    ];
+
+    const hasOpen = followups.some((followup) => followup.status === "open" || followup.status === "in_progress" || followup.status === "unknown");
+    const hasClosed = followups.some((followup) => followup.status === "closed");
+
+    if (hasClosed) {
+        lines.push(
+            "Closed follow-ups indicate prior manual-test failures that already spawned implementation work.",
+            "Treat their original failures as historical. Ask the user to rerun manual verification before creating any new follow-up work.",
+        );
+    }
+
+    if (hasOpen) {
+        lines.push(
+            "Open or unknown-status follow-ups are already tracking manual-test failures.",
+            "Do not create duplicate manual-test follow-ups for the same observed failure.",
+        );
+    }
+
+    return `${lines.join("\n")}\n`;
+}
+
+async function resolveManualTestFollowupsWithStatus(
+    pi: ExtensionAPI,
+    root: string,
+    followups: ManualTestFollowup[],
+): Promise<ManualTestFollowupWithStatus[]> {
+    if (followups.length === 0) {
+        return [];
+    }
+
+    const configResult = await resolveGitHubClientConfig(pi, root);
+    if ("error" in configResult) {
+        return followups.map((followup) => ({...followup, status: "unknown"}));
+    }
+
+    const resolved: ManualTestFollowupWithStatus[] = [];
+    for (const followup of followups) {
+        const issueNumber = parseIssueNumberFromTaskId(followup.issue_id);
+        if (!issueNumber) {
+            resolved.push({...followup, status: "unknown"});
+            continue;
+        }
+
+        try {
+            const issue = await getIssueByNumber(configResult.config, issueNumber);
+            resolved.push({
+                ...followup,
+                status: issue ? toManualTestFollowupStatus(issue) : "unknown",
+            });
+        } catch {
+            resolved.push({...followup, status: "unknown"});
+        }
+    }
+
+    return resolved;
+}
+
+async function buildManualTestFollowupContextMarkdown(
+    pi: ExtensionAPI,
+    root: string,
+    workflow: PersistedWorkflow,
+): Promise<string> {
+    if (workflow.state !== "manual-test") {
+        return "";
+    }
+
+    const resolved = await resolveManualTestFollowupsWithStatus(pi, root, workflow.manual_test_followups ?? []);
+    return buildManualTestFollowupPromptContext(resolved);
 }
 
 async function listWorkflowIssueSummaries(
@@ -1793,6 +1971,7 @@ async function guardSubtaskCommitAgainstEmptyWorkingCopy(
 
 type InterpretedMachineEffectsResult = {
     createdChildrenByParent: Map<string, TaskNode[]>;
+    createdIssues: Array<{parentTaskId: string; issue_id: string; title: string}>;
 };
 
 /**
@@ -1806,6 +1985,7 @@ async function interpretMachineEffects(
     effects: MachineWorkflowEffect[],
 ): Promise<InterpretedMachineEffectsResult | {error: string}> {
     const createdChildrenByParent = new Map<string, TaskNode[]>();
+    const createdIssues: Array<{parentTaskId: string; issue_id: string; title: string}> = [];
 
     for (const effect of effects) {
         if (effect.type === "CREATE_ISSUE") {
@@ -1827,6 +2007,11 @@ async function interpretMachineEffects(
                 subtasks: [],
             });
             createdChildrenByParent.set(effect.parentTaskId, existing);
+            createdIssues.push({
+                parentTaskId: effect.parentTaskId,
+                issue_id: created.id,
+                title: effect.title,
+            });
             ctx.ui.notify(`workflow effect: created/reused task ${created.id} (${effect.title})`, "info");
             continue;
         }
@@ -1877,7 +2062,7 @@ async function interpretMachineEffects(
         }
     }
 
-    return {createdChildrenByParent};
+    return {createdChildrenByParent, createdIssues};
 }
 
 /**
@@ -1995,8 +2180,25 @@ async function dispatchWorkflowEvent(
         return {error: interpreted.error};
     }
 
-    const mutateTree = interpreted.createdChildrenByParent.size > 0
-        ? (draft: PersistedWorkflow) => applyCreatedChildrenToTree(draft, interpreted.createdChildrenByParent)
+    const manualTestCreatedFollowups = workflowForTransition.state === "manual-test"
+        ? interpreted.createdIssues.filter((created) => created.parentTaskId === workflowForTransition.task_id)
+        : [];
+    const manualTestFollowupCreatedAt = new Date().toISOString();
+    const shouldMutateTree = interpreted.createdChildrenByParent.size > 0 || manualTestCreatedFollowups.length > 0;
+    const mutateTree = shouldMutateTree
+        ? (draft: PersistedWorkflow) => {
+            if (interpreted.createdChildrenByParent.size > 0) {
+                applyCreatedChildrenToTree(draft, interpreted.createdChildrenByParent);
+            }
+            if (manualTestCreatedFollowups.length > 0) {
+                draft.manual_test_followups = recordManualTestFollowups({
+                    existing: draft.manual_test_followups ?? [],
+                    createdIssues: manualTestCreatedFollowups,
+                    createdAt: manualTestFollowupCreatedAt,
+                    fromManualTestVersion: workflowForTransition.version,
+                });
+            }
+        }
         : undefined;
 
     const preview = cloneWorkflow(workflowForTransition);
@@ -2742,7 +2944,11 @@ async function runTaskWorkspace(
         ];
 
         const header = headerLines.join("\n");
-        const fullMessage = `${header}\n\n${issueContext}\n\n---\n\n${trimmedBody}`;
+        const manualTestFollowupContext = await buildManualTestFollowupContextMarkdown(pi, root, workflow);
+        const issueContextWithWorkflowMetadata = manualTestFollowupContext
+            ? `${issueContext}\n\n---\n\n${manualTestFollowupContext.trimEnd()}`
+            : issueContext;
+        const fullMessage = `${header}\n\n${issueContextWithWorkflowMetadata}\n\n---\n\n${trimmedBody}`;
 
         const previousAssistantId = getLastAssistantMessage(ctx)?.id ?? null;
         if (ENABLE_TRANSITION_DEBUG) {

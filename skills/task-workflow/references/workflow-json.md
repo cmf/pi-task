@@ -20,6 +20,7 @@ The workflow file is a task tree rooted at the root issue, plus workflow metadat
   "last_consumed_assistant_id": null,
   "pending_prompt_run": null,
   "pending_empty_subtask_commit": null,
+  "manual_test_followups": [],
   "version": 1,
   "updated_at": "2026-04-11T00:00:00.000Z",
   "last_transition": {
@@ -114,6 +115,24 @@ Shape:
 ```
 
 Use `null` when not in that special recovery path.
+
+### `manual_test_followups`
+
+Shape:
+
+```json
+[
+  {
+    "issue_id": "242",
+    "title": "Fix manual-test failure",
+    "fingerprint": "fix-manual-test-failure",
+    "created_at": "2026-04-11T00:00:00.000Z",
+    "from_manual_test_version": 66
+  }
+]
+```
+
+This records follow-up issues created by `manual-test -> implement`. On later manual-test prompts the extension checks GitHub for each linked issue and injects deterministic context, so closed follow-ups are treated as historical rather than fresh failures.
 
 ### `last_consumed_assistant_id`
 
