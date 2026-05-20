@@ -1,4 +1,4 @@
-import {parseFrontmatter} from "@mariozechner/pi-coding-agent";
+import {parseFrontmatter} from "@earendil-works/pi-coding-agent";
 
 /**
  * Explicit task workflow state machine used by the task extension shell (index.ts).
