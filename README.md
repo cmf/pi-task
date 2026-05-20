@@ -14,6 +14,10 @@ Before running a step, the workflow navigates back to the point in the conversat
 
 However this is tricky in pi because it's not clear when an agent turn is completely settled, and so the `end_turn` events do not have access to manipulate the conversation tree. This is because things may happen asynchronously after the end of the turn (compaction, steering, extension follow-up commands etc). This is an active area of development in pi: https://github.com/earendil-works/pi/issues/2023 & https://jot.mariozechner.at/s/cy2bzlpoilaanc.
 
+## Status
+
+This library is forkware - it's designed to work for me, and I'm unlikely to add features that work for other people, unless they also work for me. But feel free to use it, copy it, remix it, get inspired by it or whatever - use it as you like.
+
 ## Mermaid diagram
 
 ```mermaid
