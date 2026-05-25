@@ -53,8 +53,17 @@ code diff) for production readiness.
 **Testing:**
 
 - For `tdd: true` subtasks: tests are clearly described (what to test, where, how to run)
+- Reject `tdd: true` subtasks whose described test is user-facing browser/GUI/desktop/end-to-end automation.
+  - Examples: Playwright, Cypress, Selenium, Appium, or Swing user-flow automation.
+  - Require a lower-level automated test instead, or require the subtask to be user-approved `tdd: false` with the user-facing check moved to `## Manual Test Plan`.
 - Test commands are realistic and specific
 - Important edge cases are covered
+- User-facing integration/manual-style checks are not assigned to implementation subtasks; they live in `## Manual Test Plan`
+  - Examples: browser/Playwright UI flows, Swing/desktop automation, and other end-to-end app interaction
+  - Do not let implementation subtasks run, drive, use, or check those flows
+  - This covers debugging, exploration, smoke testing, automated test execution, and final verification
+  - These checks should be performed by the user during `manual-test`, not by the agent during implementation/review
+  - If the task explicitly requires adding or updating user-facing integration test assets, implementation subtasks may author those files, but do not run them before `manual-test`; require concrete user-run execution steps in `## Manual Test Plan`
 - `## Manual Test Plan` exists and is complete, concrete and realistic for end-to-end verification
 - If any subtask is `tdd: false`: it explicitly states user approval and includes concrete steps in the manual test plan
 

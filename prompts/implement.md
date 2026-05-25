@@ -50,13 +50,39 @@ Follow this loop and keep steps small:
 3. Implement the minimal code to make it pass
 4. Run the relevant test(s) to confirm they pass
 
-Then run the wider suite (or the repo’s standard checks) to avoid regressions.
+Then run the wider suite (or the repo’s standard checks) to avoid regressions,
+but only for code-level/non-user-facing checks. If the wider suite or repo’s
+standard checks include user-facing browser/GUI/end-to-end checks, skip or defer
+those checks to `manual-test`.
 
 ### If TDD is exempt (`tdd: false`, user-approved)
 
 - Implement the minimal code to satisfy the subtask.
-- Perform the verification described in the issue (manual steps, smoke test, etc.).
-- If the issue does not specify verification steps, add a small, concrete manual verification checklist to the issue.
+- Run only code-level or non-user-facing automated verification described in the issue.
+- If the issue describes user-facing/manual-style checks, add or update those steps in the root `## Manual Test Plan` instead of running them.
+
+## Verification scope
+
+During implementation, run code-level automated tests and repo checks as needed.
+If the wider suite or repo’s standard checks include user-facing browser/GUI/end-to-end checks, skip or defer those checks to `manual-test`.
+If you are unsure whether a check command drives a browser, GUI, desktop app, simulator, or end-to-end user flow,
+inspect the scripts/configuration first; do not run the command blindly.
+Prefer filtered code-level checks that exclude user-facing integration/manual-style tests.
+Do **not** run, drive, use, or check user-facing integration/manual-style tests before the
+manual-test stage. This includes browser or Playwright UI flows, Swing/desktop UI
+automation, full end-to-end app interaction, and similar checks that exercise the
+product as a user would.
+
+This restriction covers debugging, exploration, smoke testing, automated test execution, and final verification.
+If the subtask requires that kind of user-facing execution or verification, update the root
+`## Manual Test Plan` with concrete user-run steps instead of executing it in
+this state.
+
+If the subtask explicitly requires adding or updating user-facing integration test assets
+(for example Playwright specs, Cypress/Selenium tests, or Swing automation helpers), you
+may author those files. Do not run them before `manual-test` or rely on them as
+implementation verification; add concrete user-run execution steps and expected results
+to the root `## Manual Test Plan`.
 
 ## Quality bar
 

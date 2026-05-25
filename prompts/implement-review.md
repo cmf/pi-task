@@ -28,6 +28,29 @@ If TDD applies:
 3. Implement the minimal fix
 4. Re-run the test(s) and ensure they pass
 
+## Verification scope
+
+During implement-review, run code-level automated tests and repo checks as needed.
+If the wider suite or repo’s standard checks include user-facing browser/GUI/end-to-end checks, skip or defer those checks to `manual-test`.
+If you are unsure whether a check command drives a browser, GUI, desktop app, simulator, or end-to-end user flow,
+inspect the scripts/configuration first; do not run the command blindly.
+Prefer filtered code-level checks that exclude user-facing integration/manual-style tests.
+Do **not** run, drive, use, or check user-facing integration/manual-style tests before the
+manual-test stage. This includes browser or Playwright UI flows, Swing/desktop UI
+automation, full end-to-end app interaction, and similar checks that exercise the
+product as a user would.
+
+This restriction covers debugging, exploration, smoke testing, automated test execution, and final verification.
+If the finding requires that kind of user-facing execution or verification, update the root
+`## Manual Test Plan` with concrete user-run steps instead of executing it in
+this state.
+
+If the finding explicitly requires adding or updating user-facing integration test assets
+(for example Playwright specs, Cypress/Selenium tests, or Swing automation helpers), you
+may author those files. Do not run them before `manual-test` or rely on them as
+implement-review verification; add concrete user-run execution steps and expected results
+to the root `## Manual Test Plan`.
+
 ## Issue editing rules (critical)
 
 - Use `task_issue_edit` for issue content updates.

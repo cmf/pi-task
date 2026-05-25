@@ -13,9 +13,10 @@ First, determine whether the task has any useful manual testing. Some changes
 have no user-facing component, and can only reasonably be tested using automated
 tests. Any change having a user-facing component should have a manual testing step.
 
-###  If task only contains automated tests
+### If task only contains non-user-facing automated tests
 
-1. Run the tests and report the outcome to the user
+1. Run the tests and report the outcome to the user.
+   - Do not treat browser, Playwright, Swing, desktop GUI, or end-to-end user-flow automation as automated-only; those are user-facing checks and must be performed by the user in the manual-test stage.
 
 2. Request workflow transition by outputting: `<transition>commit</transition>`
 
@@ -35,9 +36,10 @@ tests. Any change having a user-facing component should have a manual testing st
    - Include commands, URLs, UI navigation paths, and edge cases where relevant.
 
 3. Ask the user to run the checklist.
-   - If there are automated tests being run as part of the checklist, run them and report the outcome to the user.
+   - User-facing integration and manual-style checks must be performed by the user. This includes browser/UI flows, Playwright-driven checks, Swing/desktop automation, and other end-to-end app interaction; do not run them yourself.
+   - If the checklist includes purely non-interactive automated tests (unit tests, type checks, lint, focused integration tests with no browser/GUI/user interaction), run them and report the outcome to the user.
    - Walk the user through running the manual tests, one by one and step by step.
-   - If required, set up the environment required for the tests for the user.
+   - If required, set up the environment required for the tests for the user, then give the user the commands, URLs, UI navigation paths, and expected results to execute.
 
 ## Output / Interaction
 

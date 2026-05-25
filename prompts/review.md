@@ -49,6 +49,14 @@ If there are no important, concrete, actionable issues: output `<transition>subt
 - If TDD is exempt (`tdd: false`):
   - There is explicit user approval recorded (in the plan or issue)
   - Manual verification steps exist and are concrete
+- Do not require implementation-stage completion of user-facing integration or manual-style testing.
+  - Reviewers must not run, drive, use, or check user-facing integration/manual-style tests before the manual-test stage.
+  - This includes browser/UI automation such as Playwright, Swing/desktop automation, and other end-to-end app interaction.
+  - The restriction covers running, driving, using, or checking these flows for debugging, exploration, smoke testing, automated test execution, and final verification.
+  - Verify these checks are captured in the root `## Manual Test Plan` for the manual-test stage.
+  - Flag an important finding if the subtask ran, drove, used, checked, or relied on pre-manual-stage user-facing integration testing, even if other code-level tests passed.
+  - Also flag an important finding if the subtask omitted concrete user-run manual-test steps or otherwise made the subtask outcome depend on those checks instead of deferring them to the manual-test stage.
+  - If the subtask explicitly requires adding or updating user-facing integration test assets, the implementation may author those files; do not run them before `manual-test`, and ensure the root `## Manual Test Plan` includes concrete user-run execution steps.
 
 **Production readiness (as applicable)**
 

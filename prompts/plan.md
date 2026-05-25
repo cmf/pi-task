@@ -28,9 +28,11 @@ Subtasks default to requiring TDD.
 
 Exceptions are allowed:
 
-1. Swing code which is unreasonably difficult to test with automation
+1. UI code, including Swing/UI code, where lower-level automated tests are not practical
 2. One-off scripts with no existing testing
 3. Documentation-only changes
+
+Swing/UI code may use lower-level automated tests where practical, but user-flow Swing automation belongs in the root `## Manual Test Plan` for the user to run during `manual-test`.
 
 If you believe a subtask should be exempt from TDD, **ask the user to confirm**.
 When the user confirms, set `tdd: false` for that subtask.
@@ -43,13 +45,36 @@ commands to the repo):
 - Implement the minimal code to make the test pass
 - Run the tests to confirm they pass
 
+User-facing browser/desktop/end-to-end automation is not an acceptable implementation-stage TDD test.
+This includes Playwright browser flows, Swing or desktop UI automation, and similar user-flow checks.
+Prefer lower-level automated tests instead: unit, component, model, service, or API tests.
+If the only meaningful test is user-facing automation, ask the user to approve `tdd: false`
+and put the concrete user-run checks in the root `## Manual Test Plan`.
+
 If `tdd: false` (user-approved), the description should include:
 
 - Note stating that the user explicitly approved manual verification for this subtask
 - Implement the minimal code to fulfil the subtask requirements
-- Run whatever manual/adhoc verification is appropriate
+- Add/update the relevant manual verification steps in the root `## Manual Test Plan`
 
 When `tdd: false`, the subtask should include testing steps in the `## Manual Test Plan` (below).
+
+### User-facing integration testing
+
+Do not put user-facing integration or manual-style test execution or verification inside implementation subtasks.
+This includes browser/UI flows with tools like Playwright, Swing or desktop UI automation,
+and other end-to-end checks that exercise the app the way a user would.
+
+Instead, place those checks in the root `## Manual Test Plan` so they are performed by
+the user during the manual-test stage. Subtask descriptions may say to add or update
+the manual test plan, but they should not instruct the implementation agent to run
+those checks before manual-test.
+
+If the task explicitly asks you to add or update user-facing integration test assets
+(for example Playwright specs, Cypress/Selenium tests, or Swing automation helpers), an
+implementation subtask may author those files. Do not run them before `manual-test` or
+rely on them as implementation verification; put concrete user-run execution steps and
+expected results in the root `## Manual Test Plan`.
 
 ## Output format
 
@@ -100,13 +125,7 @@ YAML must be valid (proper indentation, no stray text inside the delimiters).
       - Load initial values from existing config, if present
       - Persist changes back to config on Apply/OK
     - Wire the panel into the preferences dialog in `src/ui/PreferencesDialog.java`.
-    - Manual verification:
-      - Run: `./gradlew run`
-        - Expected: app launches.
-      - Open Preferences → Network.
-        - Expected: the new Proxy Settings panel renders correctly.
-      - Toggle "Use proxy", set host/port, click Apply, restart the app.
-        - Expected: values persist and are reloaded.
+    - Add the Swing UI checks for launching the app, opening Preferences → Network, and verifying persisted proxy settings to the root `## Manual Test Plan`; do not run those checks during implementation.
 </subtasks>
 ```
 
@@ -115,6 +134,7 @@ YAML must be valid (proper indentation, no stray text inside the delimiters).
 Also prepare content for a `## Manual Test Plan` section after the subtasks.
 - Steps must be explicit and include expected results.
 - Include commands/URLs/UI navigation where relevant.
+- User-facing integration/manual-style checks, including Playwright browser flows and Swing UI checks, belong here and are performed by the user during the manual-test stage.
 
 ## Writing back to the issue (required)
 
