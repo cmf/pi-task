@@ -53,6 +53,10 @@ code diff) for production readiness.
 **Testing:**
 
 - For `tdd: true` subtasks: tests are clearly described (what to test, where, how to run)
+- For `tdd: true` subtasks: tests exercise observable behaviour through an appropriate boundary (public API, CLI output, parser/model/service behaviour, generated artifact, or similar), not implementation details.
+- Reject `tdd: true` subtasks whose described test inspects or greps repository files/content to prove that implementation text, imports, function calls, prompts, config snippets, docs, test files, test cases, assertions, fixtures, snapshots, test names, or other repository content were added or changed.
+  - Repository-content assertions do not satisfy TDD. Assertions against generated outputs/artifacts are acceptable when they test observable behaviour rather than repository implementation content.
+  - Require replacement with meaningful behavioural coverage, or require the subtask to be user-approved `tdd: false` with concrete manual verification steps.
 - Reject `tdd: true` subtasks whose described test is user-facing browser/GUI/desktop/end-to-end automation.
   - Examples: Playwright, Cypress, Selenium, Appium, or Swing user-flow automation.
   - Require a lower-level automated test instead, or require the subtask to be user-approved `tdd: false` with the user-facing check moved to `## Manual Test Plan`.

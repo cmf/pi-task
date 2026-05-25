@@ -17,6 +17,7 @@ tests. Any change having a user-facing component should have a manual testing st
 
 1. Run the tests and report the outcome to the user.
    - Do not treat browser, Playwright, Swing, desktop GUI, or end-to-end user-flow automation as automated-only; those are user-facing checks and must be performed by the user in the manual-test stage.
+   - Do not treat repository-content inspection checks (for example grep/search assertions against source files, prompts, config, docs, test files, fixtures, snapshots, or test names) as useful automated-only verification. They do not satisfy TDD and should not be reported as confidence for the task.
 
 2. Request workflow transition by outputting: `<transition>commit</transition>`
 
@@ -64,7 +65,14 @@ If current manual testing finds new follow-up implementation work:
    - `title`: single-line string
    - `description`: multi-line markdown string
    - `tdd`: optional boolean (defaults to `true`)
-3. Then output `<transition>implement</transition>`.
+3. Follow-up subtasks default to TDD, but do not create, keep, count, or report automated tests/checks that inspect or grep repository files/content to prove that implementation text, imports, function calls, prompts, config snippets, docs, test files, test cases, assertions, fixtures, snapshots, test names, or other repository content were added or changed.
+   - Tests must exercise observable behaviour through an appropriate boundary, such as a public API, CLI output, parser/model/service behaviour, generated artifact, or similar.
+   - Repository-content inspection checks cannot satisfy TDD, even as supplemental verification. Assertions against generated outputs/artifacts are acceptable when they test observable behaviour rather than repository implementation content.
+   - Using grep/repository-content inspection for investigation is fine, but it is not a test.
+   - If the only plausible automated test would be a repository-content assertion that a change exists, ask the user whether `tdd: false` is acceptable and whether extra manual verification is required. Stop and wait for approval; do not output follow-up subtasks or a transition in the same response. Set `tdd: false` only with user approval.
+4. Once any required `tdd: false` approval has been obtained, output the approved `<manual-test-subtasks>...</manual-test-subtasks>` block (including `tdd: false` on approved items), followed by `<transition>implement</transition>`.
+   - For every approved `tdd: false` follow-up, the subtask description must explicitly state that the user approved the TDD exemption.
+   - The subtask description must also include the concrete manual verification steps required, or state exactly how the root `## Manual Test Plan` / `## Manual Verification` must be updated with those steps.
 
 Example:
 
@@ -86,7 +94,12 @@ Example:
 - title: Update manual verification steps for save success
   tdd: false
   description: |
-    Extend the root manual test plan to cover the corrected save flow and expected UI confirmation.
+    User approved exempting this follow-up from TDD.
+
+    Extend the root manual test plan to cover the corrected save flow and expected UI confirmation:
+    - Open the editor
+    - Click Save
+    - Expected: Save succeeds and shows a success toast
 </manual-test-subtasks>
 <transition>implement</transition>
 ```

@@ -31,6 +31,7 @@ Exceptions are allowed:
 1. UI code, including Swing/UI code, where lower-level automated tests are not practical
 2. One-off scripts with no existing testing
 3. Documentation-only changes
+4. Changes where the only plausible automated test would inspect or grep repository files/content to prove that implementation text, imports, function calls, prompts, config snippets, docs, test files, test cases, assertions, fixtures, snapshots, test names, or other repository content were added or changed
 
 Swing/UI code may use lower-level automated tests where practical, but user-flow Swing automation belongs in the root `## Manual Test Plan` for the user to run during `manual-test`.
 
@@ -44,6 +45,19 @@ commands to the repo):
 - Run it to confirm it fails
 - Implement the minimal code to make the test pass
 - Run the tests to confirm they pass
+
+TDD tests must exercise observable behaviour through an appropriate boundary, such as a public API,
+CLI output, parser/model/service behaviour, generated artifact, or equivalent lower-level interface.
+Do **not** create, keep, count, or report automated tests/checks that inspect or grep repository files/content
+to prove that implementation text, imports, function calls, prompts, config snippets, docs, test files,
+test cases, assertions, fixtures, snapshots, test names, or other repository content were added or changed.
+Such checks cannot satisfy TDD, even as supplemental verification. Assertions against generated outputs/artifacts are acceptable when they test observable behaviour rather than repository implementation content. Using grep/search for investigation
+is fine, but it is not a test.
+
+If the only plausible automated test would be a repository-content assertion that a particular change
+exists, ask the user whether this subtask should be exempt from TDD (`tdd: false`) and whether additional
+manual verification is required. Stop and wait for approval; do not update the issue or emit a transition
+in the same response. Do not create a `tdd: true` subtask whose test is just repository-content inspection.
 
 User-facing browser/desktop/end-to-end automation is not an acceptable implementation-stage TDD test.
 This includes Playwright browser flows, Swing or desktop UI automation, and similar user-flow checks.

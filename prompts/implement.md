@@ -50,6 +50,14 @@ Follow this loop and keep steps small:
 3. Implement the minimal code to make it pass
 4. Run the relevant test(s) to confirm they pass
 
+TDD tests must exercise observable behaviour through an appropriate boundary, such as a public API,
+CLI output, parser/model/service behaviour, generated artifact, or equivalent lower-level interface.
+Do **not** create, keep, count, or report automated tests/checks that inspect or grep repository files/content
+to prove that implementation text, imports, function calls, prompts, config snippets, docs, test files,
+test cases, assertions, fixtures, snapshots, test names, or other repository content were added or changed.
+Such checks cannot satisfy TDD, even as supplemental verification.
+Assertions against generated outputs/artifacts are acceptable when they test observable behaviour rather than repository implementation content. Using grep/search for investigation is fine, but it is not a test.
+
 Then run the wider suite (or the repo’s standard checks) to avoid regressions,
 but only for code-level/non-user-facing checks. If the wider suite or repo’s
 standard checks include user-facing browser/GUI/end-to-end checks, skip or defer

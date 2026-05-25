@@ -46,6 +46,9 @@ If there are no important, concrete, actionable issues: output `<transition>subt
 - If TDD is required for this subtask:
   - **New/updated tests exist and meaningfully and completely cover the behaviour** (very important!)
   - Tests are not overly brittle
+  - Tests exercise observable behaviour through an appropriate boundary (public API, CLI output, parser/model/service behaviour, generated artifact, or similar), not implementation details.
+  - Flag an important finding if any repository-content inspection test/check was created, kept, relied on, counted, or reported as verification for the subtask, including checks that inspect or grep repository files/content to prove that implementation text, imports, function calls, prompts, config snippets, docs, test files, test cases, assertions, fixtures, snapshots, test names, or other repository content were added or changed. Repository-content assertions do not satisfy TDD and should not be kept as supplemental checks. Assertions against generated outputs/artifacts are acceptable when they test observable behaviour rather than repository implementation content.
+  - If meaningful behavioural coverage already exists, require removing the repository-content inspection test/check. Otherwise require replacement with meaningful behavioural coverage, or require explicit user approval for `tdd: false` with concrete manual verification steps.
 - If TDD is exempt (`tdd: false`):
   - There is explicit user approval recorded (in the plan or issue)
   - Manual verification steps exist and are concrete
