@@ -394,14 +394,14 @@ export function upsertMarkdownSection(existingBody: string, header: string, cont
     return sectionBlock;
 }
 
-type TaskIncorporateArgs = {findings: string[]; instruction?: string};
+type TaskApplyArgs = {findings: string[]; instruction?: string};
 
-const TASK_INCORPORATE_USAGE = "Usage: /task incorporate <finding-number-or-range> [finding-number-or-range ...] [instruction]";
+const TASK_APPLY_USAGE = "Usage: /task apply <finding-number-or-range> [finding-number-or-range ...] [instruction]";
 
-export function parseTaskIncorporateArgs(args: string): TaskIncorporateArgs | {error: string} {
+export function parseTaskApplyArgs(args: string): TaskApplyArgs | {error: string} {
     const trimmed = args.trim();
     if (!trimmed) {
-        return {error: TASK_INCORPORATE_USAGE};
+        return {error: TASK_APPLY_USAGE};
     }
 
     const findings: string[] = [];
@@ -429,7 +429,7 @@ export function parseTaskIncorporateArgs(args: string): TaskIncorporateArgs | {e
 
         if (!allPartsHaveFindingSyntax) {
             if (findings.length === 0) {
-                return {error: tokenLooksLikeFindingSyntax ? `Finding identifiers must be positive integers or ranges: ${token}` : TASK_INCORPORATE_USAGE};
+                return {error: tokenLooksLikeFindingSyntax ? `Finding identifiers must be positive integers or ranges: ${token}` : TASK_APPLY_USAGE};
             }
             if (tokenLooksLikeFindingSyntax) {
                 return {error: `Finding identifiers must be positive integers or ranges: ${token}`};
@@ -457,34 +457,34 @@ export function parseTaskIncorporateArgs(args: string): TaskIncorporateArgs | {e
     }
 
     if (findings.length === 0) {
-        return {error: TASK_INCORPORATE_USAGE};
+        return {error: TASK_APPLY_USAGE};
     }
 
     const instruction = instructionStart === null ? "" : trimmed.slice(instructionStart).trim();
     return instruction ? {findings, instruction} : {findings};
 }
 
-export function buildTaskIncorporatePrompt(params: {finding: string; rootIssueMarkdown: string; instruction?: string}): string {
+export function buildTaskApplyPrompt(params: {finding: string; rootIssueMarkdown: string; instruction?: string}): string {
     const finding = params.finding.trim();
     const rootIssueMarkdown = params.rootIssueMarkdown.trimEnd();
     const instruction = params.instruction?.trim() ?? "";
     const instructionLines = instruction
         ? [
             "",
-            "Additional user instruction for this incorporation:",
-            "<incorporate-instruction>",
+            "Additional user instruction for this apply operation:",
+            "<apply-instruction>",
             instruction,
-            "</incorporate-instruction>",
+            "</apply-instruction>",
         ]
         : [];
 
     return [
-        `You are incorporating finding ${finding} from the review findings immediately above into the task plan.`,
+        `You are applying finding ${finding} from the review findings immediately above into the task plan.`,
         "",
         "Critical:",
         "- The current root issue content below is authoritative.",
         "- Ignore older copies of the plan or manual test plan in the conversation.",
-        `- Incorporate only finding ${finding}.`,
+        `- Apply only finding ${finding}.`,
         ...instructionLines,
         "- Preserve all unrelated plan and manual-test content.",
         "- Use the `task_issue_edit` tool to update the root issue.",
@@ -513,17 +513,17 @@ export function buildTaskIncorporatePrompt(params: {finding: string; rootIssueMa
     ].join("\n");
 }
 
-export function validateTaskIncorporateAssistantMessage(message: string): {ok: true} | {error: string} {
+export function validateTaskApplyAssistantMessage(message: string): {ok: true} | {error: string} {
     const transitionMatches = [...message.matchAll(/<transition>\s*([^<]+?)\s*<\/transition>/gi)];
     const lastTransition = transitionMatches.at(-1)?.[1]?.trim().toLowerCase();
     if (lastTransition) {
-        return {error: `Unexpected workflow transition emitted during /task incorporate: ${lastTransition}`};
+        return {error: `Unexpected workflow transition emitted during /task apply: ${lastTransition}`};
     }
 
     return {ok: true};
 }
 
-export function summarizeTaskIncorporateResults(params: {changed: string[]; unchanged: string[]}): {message: string; level: "info" | "warning"} {
+export function summarizeTaskApplyResults(params: {changed: string[]; unchanged: string[]}): {message: string; level: "info" | "warning"} {
     const changedLabel = `finding${params.changed.length === 1 ? "" : "s"}`;
     const unchangedLabel = `finding${params.unchanged.length === 1 ? "" : "s"}`;
 
@@ -537,19 +537,19 @@ export function summarizeTaskIncorporateResults(params: {changed: string[]; unch
     if (params.unchanged.length === 0) {
         return {
             level: "warning",
-            message: `Incorporated ${changedLabel} ${params.changed.join(", ")}. Run /task to re-review the plan.`,
+            message: `Applied ${changedLabel} ${params.changed.join(", ")}. Run /task to re-review the plan.`,
         };
     }
 
     return {
         level: "warning",
-        message: `Incorporated ${changedLabel} ${params.changed.join(", ")}; no root issue change detected for ${unchangedLabel} ${params.unchanged.join(", ")}. Run /task to re-review the plan.`,
+        message: `Applied ${changedLabel} ${params.changed.join(", ")}; no root issue change detected for ${unchangedLabel} ${params.unchanged.join(", ")}. Run /task to re-review the plan.`,
     };
 }
 
-type TaskIncorporateNotifyLevel = "info" | "warning" | "error";
+type TaskApplyNotifyLevel = "info" | "warning" | "error";
 
-export interface TaskIncorporateIterationDeps {
+export interface TaskApplyIterationDeps {
     findings: string[];
     instruction?: string;
     baseLeafId: string;
@@ -559,10 +559,10 @@ export interface TaskIncorporateIterationDeps {
     loadRootIssueMarkdown: () => Promise<{content: string} | {error: string}>;
     runPrompt: (prompt: string, finding: string) => Promise<{assistantMessage: string; assistantMessageId: string | null} | {error: string}>;
     consumeAssistantMessage: (assistantMessageId: string | null) => Promise<{ok: true} | {error: string}>;
-    notify: (message: string, level: TaskIncorporateNotifyLevel) => void;
+    notify: (message: string, level: TaskApplyNotifyLevel) => void;
 }
 
-export async function runTaskIncorporateIterations(params: TaskIncorporateIterationDeps): Promise<boolean> {
+export async function runTaskApplyIterations(params: TaskApplyIterationDeps): Promise<boolean> {
     const changedFindings: string[] = [];
     const unchangedFindings: string[] = [];
 
@@ -575,7 +575,7 @@ export async function runTaskIncorporateIterations(params: TaskIncorporateIterat
         try {
             navigation = await params.navigateToBase(params.baseLeafId, finding);
         } catch (error) {
-            params.notify(`Failed to navigate to incorporate base leaf ${params.baseLeafId}: ${error}`, "error");
+            params.notify(`Failed to navigate to apply base leaf ${params.baseLeafId}: ${error}`, "error");
             return false;
         }
 
@@ -589,7 +589,7 @@ export async function runTaskIncorporateIterations(params: TaskIncorporateIterat
             return false;
         }
 
-        const promptResult = await params.runPrompt(buildTaskIncorporatePrompt({
+        const promptResult = await params.runPrompt(buildTaskApplyPrompt({
             finding,
             instruction: params.instruction,
             rootIssueMarkdown: beforeIssue.content,
@@ -599,7 +599,7 @@ export async function runTaskIncorporateIterations(params: TaskIncorporateIterat
             return false;
         }
 
-        const validation = validateTaskIncorporateAssistantMessage(promptResult.assistantMessage);
+        const validation = validateTaskApplyAssistantMessage(promptResult.assistantMessage);
         if ("error" in validation) {
             const consumed = await params.consumeAssistantMessage(promptResult.assistantMessageId);
             if ("error" in consumed) {
@@ -625,13 +625,13 @@ export async function runTaskIncorporateIterations(params: TaskIncorporateIterat
 
         if (afterIssue.content === beforeIssue.content) {
             unchangedFindings.push(finding);
-            params.notify(`No root issue change detected after incorporating finding ${finding}.`, "warning");
+            params.notify(`No root issue change detected after applying finding ${finding}.`, "warning");
         } else {
             changedFindings.push(finding);
         }
     }
 
-    const summary = summarizeTaskIncorporateResults({
+    const summary = summarizeTaskApplyResults({
         changed: changedFindings,
         unchanged: unchangedFindings,
     });
@@ -2747,14 +2747,14 @@ export default function (pi: ExtensionAPI) {
                     if (!forced) {
                         return;
                     }
-                } else if (subcommand === "incorporate") {
-                    await withTaskLoopGuard(() => incorporateReviewPlanFindings(pi, ctx, root, subcommandArgs));
+                } else if (subcommand === "apply") {
+                    await withTaskLoopGuard(() => applyReviewPlanFindings(pi, ctx, root, subcommandArgs));
                     return;
                 } else if (subcommand === "delete") {
                     ctx.ui.notify("/task delete can only be used from the main workspace.", "error");
                     return;
                 } else if (subcommand) {
-                    ctx.ui.notify(`Unknown /task subcommand: ${subcommand}. Supported: lgtm, incorporate`, "error");
+                    ctx.ui.notify(`Unknown /task subcommand: ${subcommand}. Supported: lgtm, apply`, "error");
                     return;
                 }
 
@@ -2768,8 +2768,8 @@ export default function (pi: ExtensionAPI) {
                     await deleteTaskWorkspaceFromMain(pi, ctx, root);
                     return;
                 }
-                if (subcommand === "incorporate") {
-                    ctx.ui.notify("/task incorporate can only be used inside a per-task workspace (~/.workspaces/<task-id>/<repo>).", "error");
+                if (subcommand === "apply") {
+                    ctx.ui.notify("/task apply can only be used inside a per-task workspace (~/.workspaces/<task-id>/<repo>).", "error");
                     return;
                 }
                 if (subcommand) {
@@ -2854,13 +2854,13 @@ async function forceLGTM(
     return true;
 }
 
-async function incorporateReviewPlanFindings(
+async function applyReviewPlanFindings(
     pi: ExtensionAPI,
     ctx: ExtensionCommandContext,
     root: string,
     args: string,
 ): Promise<boolean> {
-    const parsedArgs = parseTaskIncorporateArgs(args);
+    const parsedArgs = parseTaskApplyArgs(args);
     if ("error" in parsedArgs) {
         ctx.ui.notify(parsedArgs.error, "error");
         return false;
@@ -2874,17 +2874,17 @@ async function incorporateReviewPlanFindings(
 
     const workflow = loaded.workflow;
     if (workflow.state !== "review-plan") {
-        ctx.ui.notify(`/task incorporate is only valid in review-plan; current state is ${workflow.state}.`, "error");
+        ctx.ui.notify(`/task apply is only valid in review-plan; current state is ${workflow.state}.`, "error");
         return false;
     }
 
     const baseLeafId = ctx.sessionManager.getLeafId();
     if (!baseLeafId) {
-        ctx.ui.notify("No session leaf ID available for /task incorporate", "error");
+        ctx.ui.notify("No session leaf ID available for /task apply", "error");
         return false;
     }
 
-    return runTaskIncorporateIterations({
+    return runTaskApplyIterations({
         findings: parsedArgs.findings,
         instruction: parsedArgs.instruction,
         baseLeafId,
@@ -2892,20 +2892,20 @@ async function incorporateReviewPlanFindings(
         waitForIdle: () => ctx.waitForIdle(),
         navigateToBase: async (targetLeafId, finding) => ctx.navigateTree(targetLeafId, {
             summarize: false,
-            label: `task-incorporate-${finding}`,
+            label: `task-apply-${finding}`,
         }),
         loadRootIssueMarkdown: () => loadIssueMarkdown(pi, root, workflow.task_id),
         runPrompt: async (prompt) => {
             const previousAssistantId = getLastAssistantMessage(ctx)?.id ?? null;
             const ran = await runTaskPrompt(pi, ctx, prompt);
             if (!ran) {
-                return {error: "Task incorporate prompt did not start."};
+                return {error: "Task apply prompt did not start."};
             }
 
             await waitForNewAssistantMessage(ctx, previousAssistantId);
 
             if (agentEndLooksLikeErrorFromSession(ctx)) {
-                return {error: "Task incorporate prompt ended with an agent error."};
+                return {error: "Task apply prompt ended with an agent error."};
             }
 
             const captured = captureAssistantTurnMessage(ctx, previousAssistantId);

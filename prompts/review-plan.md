@@ -19,9 +19,9 @@ code diff) for production readiness.
 
 - In `review-plan`, do not update the root issue immediately when you find plan problems.
 - First, present the findings as a short actionable list and wait for the user's decision.
-- If you find plan problems, number them plainly as `1.`, `2.`, etc. and tell the user they can incorporate selected findings with `/task incorporate <numbers> [instruction]`.
-- Do **not** update the root issue yourself in response to normal approval like “incorporate 1 and 2”; direct the user to run `/task incorporate 1 2` instead. If a finding presents alternatives, tell the user they can add an instruction, for example `/task incorporate 1 do option b`. That command reloads the current root issue before each finding to avoid overwriting earlier edits.
-- When `/task incorporate` runs, it will give you a dedicated prompt for one finding at a time; only in that dedicated incorporation prompt should you update the **root issue sections** via `task_issue_edit`:
+- If you find plan problems, number them plainly as `1.`, `2.`, etc. and tell the user they can apply selected findings with `/task apply <numbers> [instruction]`.
+- Do **not** update the root issue yourself in response to normal approval like “apply 1 and 2”; direct the user to run `/task apply 1 2` instead. If a finding presents alternatives, tell the user they can add an instruction, for example `/task apply 1 do option b`. That command reloads the current root issue before each finding to avoid overwriting earlier edits.
+- When `/task apply` runs, it will give you a dedicated prompt for one finding at a time; only in that dedicated apply prompt should you update the **root issue sections** via `task_issue_edit`:
   - For root issue `## Plan` updates:
     - `target: "root"`
     - `action: "upsert_section"`
@@ -34,7 +34,7 @@ code diff) for production readiness.
     - `content: <manual test plan section body only>`
 - Do not ask the user to manually edit issue contents.
 - Workflow transitions are extension-controlled.
-- If the user explicitly wants to proceed without incorporating any of the findings, treat those findings as waived for this review pass.
+- If the user explicitly wants to proceed without applying any of the findings, treat those findings as waived for this review pass.
 
 ## Review Checklist
 
@@ -97,14 +97,14 @@ code diff) for production readiness.
 
 - If you have **no important, concrete, actionable** findings and you are not missing any information: output `<transition>implement</transition>`.
 - If you have findings and the user has **not yet approved** changes: present them as a short list and stop. Do **not** emit a transition yet.
-- If the user approves incorporating some or all of the findings in normal conversation:
+- If the user approves applying some or all of the findings in normal conversation:
   - do **not** update the root issue yourself
-  - tell the user to run `/task incorporate <numbers> [instruction]` for the selected findings, for example `/task incorporate 1 2` or `/task incorporate 1 do option b`
+  - tell the user to run `/task apply <numbers> [instruction]` for the selected findings, for example `/task apply 1 2` or `/task apply 1 do option b`
   - do **not** emit a workflow transition
-- If you are responding to a dedicated `/task incorporate` prompt:
+- If you are responding to a dedicated `/task apply` prompt:
   - update the root issue plan/manual-test content via `task_issue_edit`
   - do **not** emit a workflow transition
-  - tell the user: when they are done incorporating findings, run `/task` for re-review; if they want to proceed to implementation without further re-review, run `/task lgtm`
+  - tell the user: when they are done applying findings, run `/task` for re-review; if they want to proceed to implementation without further re-review, run `/task lgtm`
 - If the user explicitly says all findings are not required / should be waived for this task, emit `<transition>implement</transition>`.
 - If anything is unclear or you need a user decision/constraint: ask **one** clarifying question and stop (do **not** emit a transition yet).
 
@@ -112,21 +112,21 @@ code diff) for production readiness.
 
 For each finding:
 
-- Number findings plainly as `1.`, `2.`, etc. so the user can reference them with `/task incorporate 1 2` or add clarification like `/task incorporate 1 do option b`.
+- Number findings plainly as `1.`, `2.`, etc. so the user can reference them with `/task apply 1 2` or add clarification like `/task apply 1 do option b`.
 - Reference the exact subtask by **title** (and quote the relevant lines if helpful)
 - Explain **why** it matters
 - Specify exactly **what to change** in the plan
 
-If the user approves incorporating your findings in normal conversation, tell them to run `/task incorporate <numbers> [instruction]` rather than updating the root issue yourself. Until then, only report the findings.
+If the user approves applying your findings in normal conversation, tell them to run `/task apply <numbers> [instruction]` rather than updating the root issue yourself. Until then, only report the findings.
 
 ## Critical Rules
 
 - Emit `<transition>implement</transition>` only when:
   - there are no important findings, or
   - the user has explicitly approved proceeding without addressing any of the findings.
-- Do not emit `<transition>review-plan</transition>` after incorporating findings.
-- In normal review-plan conversation, do not incorporate findings yourself; direct the user to `/task incorporate <numbers> [instruction]`.
-- After a dedicated `/task incorporate` prompt updates the root issue, tell the user to run `/task` for re-review, or `/task lgtm` to proceed to implementation without further re-review.
+- Do not emit `<transition>review-plan</transition>` after applying findings.
+- In normal review-plan conversation, do not apply findings yourself; direct the user to `/task apply <numbers> [instruction]`.
+- After a dedicated `/task apply` prompt updates the root issue, tell the user to run `/task` for re-review, or `/task lgtm` to proceed to implementation without further re-review.
 - If important findings exist and the user has not yet approved any change, do not emit a transition.
 - Be specific (reference subtask titles / quoted text; avoid vague advice).
 - Explain why each issue matters.
