@@ -394,6 +394,251 @@ export function upsertMarkdownSection(existingBody: string, header: string, cont
     return sectionBlock;
 }
 
+type TaskIncorporateArgs = {findings: string[]; instruction?: string};
+
+const TASK_INCORPORATE_USAGE = "Usage: /task incorporate <finding-number-or-range> [finding-number-or-range ...] [instruction]";
+
+export function parseTaskIncorporateArgs(args: string): TaskIncorporateArgs | {error: string} {
+    const trimmed = args.trim();
+    if (!trimmed) {
+        return {error: TASK_INCORPORATE_USAGE};
+    }
+
+    const findings: string[] = [];
+    const seen = new Set<string>();
+    const addFinding = (finding: number) => {
+        const token = String(finding);
+        if (!seen.has(token)) {
+            seen.add(token);
+            findings.push(token);
+        }
+    };
+
+    let instructionStart: number | null = null;
+    for (const match of trimmed.matchAll(/\S+/g)) {
+        const rawToken = match[0];
+        const token = rawToken.replace(/,+$/g, "");
+        if (!token) {
+            continue;
+        }
+
+        const parts = token.split(",").filter(Boolean);
+        const tokenLooksLikeFindingSyntax = /^[\d,-]+$/.test(token);
+        const allPartsHaveFindingSyntax = parts.length > 0
+            && parts.every((part) => /^[1-9]\d*(?:-[1-9]\d*)?$/.test(part));
+
+        if (!allPartsHaveFindingSyntax) {
+            if (findings.length === 0) {
+                return {error: tokenLooksLikeFindingSyntax ? `Finding identifiers must be positive integers or ranges: ${token}` : TASK_INCORPORATE_USAGE};
+            }
+            if (tokenLooksLikeFindingSyntax) {
+                return {error: `Finding identifiers must be positive integers or ranges: ${token}`};
+            }
+            instructionStart = match.index ?? 0;
+            break;
+        }
+
+        for (const part of parts) {
+            const rangeMatch = /^([1-9]\d*)-([1-9]\d*)$/.exec(part);
+            if (rangeMatch) {
+                const start = Number(rangeMatch[1]);
+                const end = Number(rangeMatch[2]);
+                if (start > end) {
+                    return {error: `Finding ranges must be ascending: ${part}`};
+                }
+                for (let finding = start; finding <= end; finding += 1) {
+                    addFinding(finding);
+                }
+                continue;
+            }
+
+            addFinding(Number(part));
+        }
+    }
+
+    if (findings.length === 0) {
+        return {error: TASK_INCORPORATE_USAGE};
+    }
+
+    const instruction = instructionStart === null ? "" : trimmed.slice(instructionStart).trim();
+    return instruction ? {findings, instruction} : {findings};
+}
+
+export function buildTaskIncorporatePrompt(params: {finding: string; rootIssueMarkdown: string; instruction?: string}): string {
+    const finding = params.finding.trim();
+    const rootIssueMarkdown = params.rootIssueMarkdown.trimEnd();
+    const instruction = params.instruction?.trim() ?? "";
+    const instructionLines = instruction
+        ? [
+            "",
+            "Additional user instruction for this incorporation:",
+            "<incorporate-instruction>",
+            instruction,
+            "</incorporate-instruction>",
+        ]
+        : [];
+
+    return [
+        `You are incorporating finding ${finding} from the review findings immediately above into the task plan.`,
+        "",
+        "Critical:",
+        "- The current root issue content below is authoritative.",
+        "- Ignore older copies of the plan or manual test plan in the conversation.",
+        `- Incorporate only finding ${finding}.`,
+        ...instructionLines,
+        "- Preserve all unrelated plan and manual-test content.",
+        "- Use the `task_issue_edit` tool to update the root issue.",
+        "- Use `action: \"upsert_section\"` with `section: \"plan\"` or `section: \"manual_test_plan\"` for section updates.",
+        "- For root issue `## Plan` updates:",
+        "  - `target: \"root\"`",
+        "  - `action: \"upsert_section\"`",
+        "  - `section: \"plan\"`",
+        "  - `content: <plan section body only, including <subtasks>...</subtasks>>`",
+        "- For root issue `## Manual Test Plan` updates:",
+        "  - `target: \"root\"`",
+        "  - `action: \"upsert_section\"`",
+        "  - `section: \"manual_test_plan\"`",
+        "  - `content: <manual test plan section body only>`",
+        "- Do not include section headers in `content`.",
+        "- Do not include the `# Title` line from the current root issue content in any edit.",
+        "- Do not emit any workflow transition.",
+        "- If you emit any `<transition>...</transition>` tag, it will be ignored; this command only edits the root issue.",
+        "- Do not implement code.",
+        "",
+        "## Current root issue content",
+        "",
+        "<root-issue-current>",
+        rootIssueMarkdown,
+        "</root-issue-current>",
+    ].join("\n");
+}
+
+export function validateTaskIncorporateAssistantMessage(message: string): {ok: true} | {error: string} {
+    const transitionMatches = [...message.matchAll(/<transition>\s*([^<]+?)\s*<\/transition>/gi)];
+    const lastTransition = transitionMatches.at(-1)?.[1]?.trim().toLowerCase();
+    if (lastTransition) {
+        return {error: `Unexpected workflow transition emitted during /task incorporate: ${lastTransition}`};
+    }
+
+    return {ok: true};
+}
+
+export function summarizeTaskIncorporateResults(params: {changed: string[]; unchanged: string[]}): {message: string; level: "info" | "warning"} {
+    const changedLabel = `finding${params.changed.length === 1 ? "" : "s"}`;
+    const unchangedLabel = `finding${params.unchanged.length === 1 ? "" : "s"}`;
+
+    if (params.changed.length === 0) {
+        return {
+            level: "warning",
+            message: `No root issue changes detected for ${unchangedLabel} ${params.unchanged.join(", ")}. Run /task to re-review the plan.`,
+        };
+    }
+
+    if (params.unchanged.length === 0) {
+        return {
+            level: "warning",
+            message: `Incorporated ${changedLabel} ${params.changed.join(", ")}. Run /task to re-review the plan.`,
+        };
+    }
+
+    return {
+        level: "warning",
+        message: `Incorporated ${changedLabel} ${params.changed.join(", ")}; no root issue change detected for ${unchangedLabel} ${params.unchanged.join(", ")}. Run /task to re-review the plan.`,
+    };
+}
+
+type TaskIncorporateNotifyLevel = "info" | "warning" | "error";
+
+export interface TaskIncorporateIterationDeps {
+    findings: string[];
+    instruction?: string;
+    baseLeafId: string;
+    isIdle: () => boolean;
+    waitForIdle: () => Promise<void>;
+    navigateToBase: (baseLeafId: string, finding: string) => Promise<{cancelled: boolean}>;
+    loadRootIssueMarkdown: () => Promise<{content: string} | {error: string}>;
+    runPrompt: (prompt: string, finding: string) => Promise<{assistantMessage: string; assistantMessageId: string | null} | {error: string}>;
+    consumeAssistantMessage: (assistantMessageId: string | null) => Promise<{ok: true} | {error: string}>;
+    notify: (message: string, level: TaskIncorporateNotifyLevel) => void;
+}
+
+export async function runTaskIncorporateIterations(params: TaskIncorporateIterationDeps): Promise<boolean> {
+    const changedFindings: string[] = [];
+    const unchangedFindings: string[] = [];
+
+    for (const finding of params.findings) {
+        if (!params.isIdle()) {
+            await params.waitForIdle();
+        }
+
+        let navigation;
+        try {
+            navigation = await params.navigateToBase(params.baseLeafId, finding);
+        } catch (error) {
+            params.notify(`Failed to navigate to incorporate base leaf ${params.baseLeafId}: ${error}`, "error");
+            return false;
+        }
+
+        if (navigation.cancelled) {
+            return false;
+        }
+
+        const beforeIssue = await params.loadRootIssueMarkdown();
+        if ("error" in beforeIssue) {
+            params.notify(beforeIssue.error, "error");
+            return false;
+        }
+
+        const promptResult = await params.runPrompt(buildTaskIncorporatePrompt({
+            finding,
+            instruction: params.instruction,
+            rootIssueMarkdown: beforeIssue.content,
+        }), finding);
+        if ("error" in promptResult) {
+            params.notify(promptResult.error, "error");
+            return false;
+        }
+
+        const validation = validateTaskIncorporateAssistantMessage(promptResult.assistantMessage);
+        if ("error" in validation) {
+            const consumed = await params.consumeAssistantMessage(promptResult.assistantMessageId);
+            if ("error" in consumed) {
+                params.notify(consumed.error, "error");
+                return false;
+            }
+
+            params.notify(`${validation.error}; ignored. Run /task to re-review the updated plan.`, "warning");
+            return false;
+        }
+
+        const consumed = await params.consumeAssistantMessage(promptResult.assistantMessageId);
+        if ("error" in consumed) {
+            params.notify(consumed.error, "error");
+            return false;
+        }
+
+        const afterIssue = await params.loadRootIssueMarkdown();
+        if ("error" in afterIssue) {
+            params.notify(afterIssue.error, "error");
+            return false;
+        }
+
+        if (afterIssue.content === beforeIssue.content) {
+            unchangedFindings.push(finding);
+            params.notify(`No root issue change detected after incorporating finding ${finding}.`, "warning");
+        } else {
+            changedFindings.push(finding);
+        }
+    }
+
+    const summary = summarizeTaskIncorporateResults({
+        changed: changedFindings,
+        unchanged: unchangedFindings,
+    });
+    params.notify(summary.message, summary.level);
+    return true;
+}
+
 function parseGitHubRepoFromRemoteUrl(remoteUrl: string): {owner: string; repo: string} | null {
     const trimmed = remoteUrl.trim();
     if (!trimmed) return null;
@@ -2476,6 +2721,7 @@ export default function (pi: ExtensionAPI) {
         handler: async (args, ctx) => {
             const trimmedArgs = (args ?? "").trim();
             const subcommand = trimmedArgs.split(/\s+/).filter(Boolean)[0]?.toLowerCase() ?? "";
+            const subcommandArgs = subcommand ? trimmedArgs.slice(subcommand.length).trim() : "";
 
             // Check required commands
             for (const cmd of ["jj", "git"]) {
@@ -2501,11 +2747,14 @@ export default function (pi: ExtensionAPI) {
                     if (!forced) {
                         return;
                     }
+                } else if (subcommand === "incorporate") {
+                    await withTaskLoopGuard(() => incorporateReviewPlanFindings(pi, ctx, root, subcommandArgs));
+                    return;
                 } else if (subcommand === "delete") {
                     ctx.ui.notify("/task delete can only be used from the main workspace.", "error");
                     return;
                 } else if (subcommand) {
-                    ctx.ui.notify(`Unknown /task subcommand: ${subcommand}. Supported: lgtm`, "error");
+                    ctx.ui.notify(`Unknown /task subcommand: ${subcommand}. Supported: lgtm, incorporate`, "error");
                     return;
                 }
 
@@ -2517,6 +2766,10 @@ export default function (pi: ExtensionAPI) {
                 }
                 if (subcommand === "delete") {
                     await deleteTaskWorkspaceFromMain(pi, ctx, root);
+                    return;
+                }
+                if (subcommand === "incorporate") {
+                    ctx.ui.notify("/task incorporate can only be used inside a per-task workspace (~/.workspaces/<task-id>/<repo>).", "error");
                     return;
                 }
                 if (subcommand) {
@@ -2599,6 +2852,84 @@ async function forceLGTM(
 
     ctx.ui.notify(`/task lgtm applied in ${workflow.state}.`, "info");
     return true;
+}
+
+async function incorporateReviewPlanFindings(
+    pi: ExtensionAPI,
+    ctx: ExtensionCommandContext,
+    root: string,
+    args: string,
+): Promise<boolean> {
+    const parsedArgs = parseTaskIncorporateArgs(args);
+    if ("error" in parsedArgs) {
+        ctx.ui.notify(parsedArgs.error, "error");
+        return false;
+    }
+
+    const loaded = loadWorkflow(root);
+    if ("error" in loaded) {
+        ctx.ui.notify(loaded.error, "error");
+        return false;
+    }
+
+    const workflow = loaded.workflow;
+    if (workflow.state !== "review-plan") {
+        ctx.ui.notify(`/task incorporate is only valid in review-plan; current state is ${workflow.state}.`, "error");
+        return false;
+    }
+
+    const baseLeafId = ctx.sessionManager.getLeafId();
+    if (!baseLeafId) {
+        ctx.ui.notify("No session leaf ID available for /task incorporate", "error");
+        return false;
+    }
+
+    return runTaskIncorporateIterations({
+        findings: parsedArgs.findings,
+        instruction: parsedArgs.instruction,
+        baseLeafId,
+        isIdle: () => ctx.isIdle(),
+        waitForIdle: () => ctx.waitForIdle(),
+        navigateToBase: async (targetLeafId, finding) => ctx.navigateTree(targetLeafId, {
+            summarize: false,
+            label: `task-incorporate-${finding}`,
+        }),
+        loadRootIssueMarkdown: () => loadIssueMarkdown(pi, root, workflow.task_id),
+        runPrompt: async (prompt) => {
+            const previousAssistantId = getLastAssistantMessage(ctx)?.id ?? null;
+            const ran = await runTaskPrompt(pi, ctx, prompt);
+            if (!ran) {
+                return {error: "Task incorporate prompt did not start."};
+            }
+
+            await waitForNewAssistantMessage(ctx, previousAssistantId);
+
+            if (agentEndLooksLikeErrorFromSession(ctx)) {
+                return {error: "Task incorporate prompt ended with an agent error."};
+            }
+
+            const captured = captureAssistantTurnMessage(ctx, previousAssistantId);
+            if ("error" in captured) {
+                return {error: captured.error};
+            }
+
+            return captured;
+        },
+        consumeAssistantMessage: async (assistantMessageId) => {
+            const latestWorkflow = loadWorkflow(root);
+            if ("error" in latestWorkflow) {
+                return {error: latestWorkflow.error};
+            }
+
+            const consumed = persistConsumedAssistantMessageId(root, latestWorkflow.workflow, assistantMessageId);
+            if ("error" in consumed) {
+                return {error: consumed.error};
+            }
+
+            return {ok: true};
+        },
+        notify: (message, level) => ctx.ui.notify(message, level),
+    });
 }
 
 function getLastAssistantMessage(ctx: ExtensionContext): {id: string | null; text: string} | null {
