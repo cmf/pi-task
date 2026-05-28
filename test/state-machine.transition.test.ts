@@ -346,6 +346,59 @@ test("implement: always advances to review", () => {
     assert.deepEqual(decision.activeTaskTarget, {type: "current"});
 });
 
+function manualDone(completedState: WorkflowState): WorkflowEvent {
+    return {type: "MANUAL_DONE", completedState};
+}
+
+test("manual done: advances implement to review", () => {
+    const decision = transition(
+        makeSnapshot("implement", {activeTaskId: SUBTASK, activeTaskParentId: ROOT}),
+        manualDone("implement"),
+    );
+
+    expectKind(decision, "applied");
+    assert.equal(decision.state, "review");
+    assert.deepEqual(decision.activeTaskTarget, {type: "current"});
+    assert.deepEqual(decision.effects, []);
+});
+
+test("manual done: advances implement-review like a completed implementation turn", () => {
+    const withNext = transition(
+        makeSnapshot("implement-review", {
+            activeTaskId: FINDING,
+            activeTaskParentId: SUBTASK,
+            activeTaskNextSiblingId: NEXT,
+        }),
+        manualDone("implement-review"),
+    );
+
+    expectKind(withNext, "applied");
+    assert.equal(withNext.state, "implement-review");
+    assert.deepEqual(withNext.activeTaskTarget, {type: "next-sibling"});
+    assert.deepEqual(withNext.effects, [{type: "CLOSE_ISSUE", taskId: FINDING}]);
+
+    const lastFinding = transition(
+        makeSnapshot("implement-review", {
+            activeTaskId: FINDING,
+            activeTaskParentId: SUBTASK,
+            activeTaskNextSiblingId: null,
+        }),
+        manualDone("implement-review"),
+    );
+
+    expectKind(lastFinding, "applied");
+    assert.equal(lastFinding.state, "review");
+    assert.deepEqual(lastFinding.activeTaskTarget, {type: "parent"});
+    assert.deepEqual(lastFinding.effects, [{type: "CLOSE_ISSUE", taskId: FINDING}]);
+});
+
+test("manual done: rejects unsupported states", () => {
+    const decision = transition(makeSnapshot("review"), manualDone("review"));
+
+    expectKind(decision, "rejected");
+    assert.equal(decision.reason, "MANUAL_DONE is only valid in implement or implement-review");
+});
+
 test("review: approve path transitions to subtask-commit", () => {
     const decision = transition(
         makeSnapshot("review", {activeTaskId: SUBTASK, activeTaskParentId: ROOT}),
@@ -560,6 +613,14 @@ test("manual-test: COMPLETE transitions to commit on <transition>commit</transit
     expectKind(decision, "applied");
     assert.equal(decision.state, "commit");
     assert.deepEqual(decision.activeTaskTarget, {type: "root"});
+});
+
+test("manual-test: ignores interactive COMPLETE without a transition", () => {
+    const decision = transition(makeSnapshot("manual-test"), complete("manual-test", "Manual verification is still in progress."));
+
+    expectKind(decision, "ignored");
+    assert.equal(decision.state, "manual-test");
+    assert.deepEqual(decision.activeTaskTarget, {type: "current"});
 });
 
 test("manual-test: implement transition requires manual-test subtasks", () => {

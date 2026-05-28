@@ -8,6 +8,7 @@ The **task** extension provides a deterministic, ticket-driven workflow on top o
 - Command: `/task`
 - Main-workspace cleanup: `/task delete` lets you select and remove a per-task workspace (`jj workspace forget` + delete workspace directory).
 - Escape hatch: `/task lgtm` (task workspace only) to force-approve `review-plan` or `review`.
+- Recovery command: `/task done` (task workspace only) manually completes an implementation-style state (`implement` or `implement-review`) when automatic advancement was missed.
 - Source of truth: **`.tasks/workflow.json`** in the task workspace.
 - Prompt selection: loads `prompts/<workflow.state>.md` (or project override at `.pi/task/<state>.md`, then user override at `~/.pi/agent/task/<state>.md`).
 
@@ -73,11 +74,11 @@ The extension treats your repo in two modes:
 - `review-plan`:
   - on `<transition>review-plan</transition>`: remain in `review-plan` and run another review pass
   - on `<transition>implement</transition>` (or `/task lgtm`): parse `<subtasks>...</subtasks>`, create/reuse depth-1 subtasks, set first active, move to `implement`
-- `implement -> review` deterministically after turn
+- `implement -> review` deterministically after turn or via `/task done`
 - `review`:
   - on `<transition>subtask-commit</transition>` (or `/task lgtm`): move to `subtask-commit`
   - on `<review-findings>...</review-findings>` + `<transition>implement-review</transition>`: create/reuse depth-2 finding tasks, set first active, move to `implement-review`
-- `implement-review`:
+- `implement-review` (deterministically after turn or via `/task done`):
   - close active finding
   - move to next finding or back to parent subtask `review`
 - `subtask-commit`:

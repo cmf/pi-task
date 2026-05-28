@@ -31,11 +31,11 @@ stateDiagram-v2
     review_plan --> review_plan: user updates plan
     review_plan --> implement: approved or /task lgtm
 
-    implement --> review
+    implement --> review: completed or /task done
 
     review --> implement_review
-    implement_review --> implement_review: next finding
-    implement_review --> review
+    implement_review --> implement_review: next finding or /task done
+    implement_review --> review: completed or /task done
 
     review --> subtask_commit
     subtask_commit --> implement: next subtask
@@ -108,10 +108,10 @@ Commits:
 | `plan` | `review-plan` | `<transition>review-plan</transition>` | Root issue must contain a valid `## Plan` with non-empty `<subtasks>`. |
 | `review-plan` | `review-plan` | `<transition>review-plan</transition>` | Re-review after plan changes. Plan subtasks must still parse. |
 | `review-plan` | `implement` | `<transition>implement</transition>` or `/task lgtm` | Creates child issues from plan subtasks; activates first subtask. |
-| `implement` | `review` | Agent turn completes | Deterministic transition after implementation prompt. |
+| `implement` | `review` | Agent turn completes or `/task done` | Deterministic transition after implementation prompt; `/task done` manually applies the same completion transition. |
 | `review` | `implement-review` | `<transition>implement-review</transition>` + `<review-findings>` | Creates finding issues under current subtask; activates first finding. |
-| `implement-review` | `implement-review` | Agent turn completes | Closes current finding and moves to next finding. |
-| `implement-review` | `review` | Agent turn completes | Closes final finding and returns to parent subtask review. |
+| `implement-review` | `implement-review` | Agent turn completes or `/task done` | Closes current finding and moves to next finding. |
+| `implement-review` | `review` | Agent turn completes or `/task done` | Closes final finding and returns to parent subtask review. |
 | `review` | `subtask-commit` | `<transition>subtask-commit</transition>` or `/task lgtm` | Review approved. |
 | `subtask-commit` | `implement` | `<commit-message>` and next subtask exists | Closes current subtask, runs `jj commit`, activates next subtask. |
 | `subtask-commit` | `manual-test` | `<commit-message>` and no subtasks remain | Closes current subtask, runs `jj commit`, returns to root. |

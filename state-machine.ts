@@ -48,6 +48,10 @@ export type WorkflowEvent =
      * Root issue markdown at time of force. Required in review-plan.
      */
     rootIssueMarkdown?: string;
+}
+    | {
+    type: "MANUAL_DONE";
+    completedState: WorkflowState;
 };
 
 export type WorkflowEffect =
@@ -279,6 +283,23 @@ export function eventNeedsRootIssueMarkdown(
 }
 
 export function transition(snapshot: WorkflowSnapshot, event: WorkflowEvent): TransitionDecision {
+    if (event.type === "MANUAL_DONE") {
+        if (event.completedState !== snapshot.state) {
+            return error(snapshot, event, "Stale MANUAL_DONE event for a different state");
+        }
+
+        switch (snapshot.state) {
+            case "implement":
+                return move(snapshot, "review", {type: "current"});
+
+            case "implement-review":
+                return completeImplementReview(snapshot, event);
+
+            default:
+                return error(snapshot, event, "MANUAL_DONE is only valid in implement or implement-review");
+        }
+    }
+
     if (event.type === "FORCE_LGTM") {
         if (event.completedState !== snapshot.state) {
             return error(snapshot, event, "Stale FORCE_LGTM event for a different state");
@@ -452,19 +473,8 @@ export function transition(snapshot: WorkflowSnapshot, event: WorkflowEvent): Tr
             }
         }
 
-        case "implement-review": {
-            if (!snapshot.activeTaskParentId) {
-                return error(snapshot, event, "implement-review requires activeTaskParentId in snapshot");
-            }
-
-            const effects: WorkflowEffect[] = [{type: "CLOSE_ISSUE", taskId: snapshot.activeTaskId}];
-
-            if (snapshot.activeTaskNextSiblingId) {
-                return move(snapshot, "implement-review", {type: "next-sibling"}, effects);
-            }
-
-            return move(snapshot, "review", {type: "parent"}, effects);
-        }
+        case "implement-review":
+            return completeImplementReview(snapshot, event);
 
         case "subtask-commit": {
             if (!parsed.commitMessage) {
@@ -485,6 +495,9 @@ export function transition(snapshot: WorkflowSnapshot, event: WorkflowEvent): Tr
 
         case "manual-test": {
             switch (parsed.requestedState) {
+                case null:
+                    return ignored(snapshot, event); // Interactive manual verification turns
+
                 case "commit":
                     return move(snapshot, "commit", {type: "root"});
 
@@ -537,6 +550,20 @@ export function transition(snapshot: WorkflowSnapshot, event: WorkflowEvent): Tr
             return assertNever(snapshot.state);
         }
     }
+}
+
+function completeImplementReview(snapshot: WorkflowSnapshot, event: WorkflowEvent): TransitionDecision {
+    if (!snapshot.activeTaskParentId) {
+        return error(snapshot, event, "implement-review requires activeTaskParentId in snapshot");
+    }
+
+    const effects: WorkflowEffect[] = [{type: "CLOSE_ISSUE", taskId: snapshot.activeTaskId}];
+
+    if (snapshot.activeTaskNextSiblingId) {
+        return move(snapshot, "implement-review", {type: "next-sibling"}, effects);
+    }
+
+    return move(snapshot, "review", {type: "parent"}, effects);
 }
 
 function move(

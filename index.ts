@@ -2359,7 +2359,10 @@ function machineEventAuditLabel(event: MachineWorkflowEvent): string {
     if (event.type === "COMPLETE") {
         return `machine:complete:${event.completedState}`;
     }
-    return `machine:force-lgtm:${event.completedState}`;
+    if (event.type === "FORCE_LGTM") {
+        return `machine:force-lgtm:${event.completedState}`;
+    }
+    return `machine:manual-done:${event.completedState}`;
 }
 
 async function dispatchWorkflowEvent(
@@ -2747,6 +2750,11 @@ export default function (pi: ExtensionAPI) {
                     if (!forced) {
                         return;
                     }
+                } else if (subcommand === "done") {
+                    const advanced = await markImplementationDone(pi, ctx, root);
+                    if (!advanced) {
+                        return;
+                    }
                 } else if (subcommand === "apply") {
                     await withTaskLoopGuard(() => applyReviewPlanFindings(pi, ctx, root, subcommandArgs));
                     return;
@@ -2754,7 +2762,7 @@ export default function (pi: ExtensionAPI) {
                     ctx.ui.notify("/task delete can only be used from the main workspace.", "error");
                     return;
                 } else if (subcommand) {
-                    ctx.ui.notify(`Unknown /task subcommand: ${subcommand}. Supported: lgtm, apply`, "error");
+                    ctx.ui.notify(`Unknown /task subcommand: ${subcommand}. Supported: lgtm, done, apply`, "error");
                     return;
                 }
 
@@ -2762,6 +2770,10 @@ export default function (pi: ExtensionAPI) {
             } else {
                 if (subcommand === "lgtm") {
                     ctx.ui.notify("/task lgtm can only be used inside a per-task workspace (~/.workspaces/<task-id>/<repo>).", "error");
+                    return;
+                }
+                if (subcommand === "done") {
+                    ctx.ui.notify("/task done can only be used inside a per-task workspace (~/.workspaces/<task-id>/<repo>).", "error");
                     return;
                 }
                 if (subcommand === "delete") {
@@ -2851,6 +2863,46 @@ async function forceLGTM(
     }
 
     ctx.ui.notify(`/task lgtm applied in ${workflow.state}.`, "info");
+    return true;
+}
+
+async function markImplementationDone(
+    pi: ExtensionAPI,
+    ctx: ExtensionCommandContext,
+    root: string,
+): Promise<boolean> {
+    if (!isTaskWorkspace(root)) {
+        ctx.ui.notify("/task done is only supported in a task workspace.", "error");
+        return false;
+    }
+
+    const loaded = loadWorkflow(root);
+    if ("error" in loaded) {
+        ctx.ui.notify(loaded.error, "error");
+        return false;
+    }
+
+    const workflow = loaded.workflow;
+    const result = await dispatchWorkflowEvent(pi, ctx, root, workflow, {
+        type: "MANUAL_DONE",
+        completedState: workflow.state,
+    });
+    if ("error" in result) {
+        ctx.ui.notify(result.error, "error");
+        return false;
+    }
+
+    if (!result.changed) {
+        return false;
+    }
+
+    const clearedPending = persistPendingPromptRun(root, result.workflow, null);
+    if ("error" in clearedPending) {
+        ctx.ui.notify(clearedPending.error, "error");
+        return false;
+    }
+
+    ctx.ui.notify(`/task done applied in ${workflow.state}.`, "info");
     return true;
 }
 
