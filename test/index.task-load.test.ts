@@ -15,13 +15,79 @@ type LoadTaskPrompt = (name: string, cwd: string, agentDir: string, extensionMod
     searched: string[];
 };
 
-const {loadTaskPrompt} = taskExtension as {
+type ApplyTaskPromptFastMode = (
+    pi: {events?: {emit: (event: string, payload: unknown) => void}},
+    notify: (message: string, level: "info" | "warning" | "error") => void,
+    frontmatter: Record<string, unknown>,
+    sourcePath: string,
+) => void;
+
+const {loadTaskPrompt, applyTaskPromptFastMode} = taskExtension as {
     loadTaskPrompt?: LoadTaskPrompt;
+    applyTaskPromptFastMode?: ApplyTaskPromptFastMode;
 };
 
 function makeTempDir(prefix: string): string {
     return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 }
+
+test("applyTaskPromptFastMode emits codex fast event when fast is true", () => {
+    assert.equal(typeof applyTaskPromptFastMode, "function");
+
+    const emitted: Array<{event: string; payload: unknown}> = [];
+    const notifications: Array<{message: string; level: "info" | "warning" | "error"}> = [];
+
+    applyTaskPromptFastMode!(
+        {events: {emit: (event, payload) => emitted.push({event, payload})}},
+        (message, level) => notifications.push({message, level}),
+        {fast: true},
+        "/tmp/plan.md",
+    );
+
+    assert.deepEqual(emitted, [{
+        event: "pi-codex:fast:set",
+        payload: {enabled: true, source: "pi-task", notify: true},
+    }]);
+    assert.deepEqual(notifications, []);
+});
+
+test("applyTaskPromptFastMode emits codex fast event when fast is false", () => {
+    assert.equal(typeof applyTaskPromptFastMode, "function");
+
+    const emitted: Array<{event: string; payload: unknown}> = [];
+
+    applyTaskPromptFastMode!(
+        {events: {emit: (event, payload) => emitted.push({event, payload})}},
+        () => {},
+        {fast: false},
+        "/tmp/review.md",
+    );
+
+    assert.deepEqual(emitted, [{
+        event: "pi-codex:fast:set",
+        payload: {enabled: false, source: "pi-task", notify: true},
+    }]);
+});
+
+test("applyTaskPromptFastMode rejects invalid fast frontmatter", () => {
+    assert.equal(typeof applyTaskPromptFastMode, "function");
+
+    const emitted: Array<{event: string; payload: unknown}> = [];
+    const notifications: Array<{message: string; level: "info" | "warning" | "error"}> = [];
+
+    applyTaskPromptFastMode!(
+        {events: {emit: (event, payload) => emitted.push({event, payload})}},
+        (message, level) => notifications.push({message, level}),
+        {fast: "maybe"},
+        "/tmp/implement.md",
+    );
+
+    assert.deepEqual(emitted, []);
+    assert.deepEqual(notifications, [{
+        level: "error",
+        message: "Invalid fast value \"maybe\" in /tmp/implement.md; expected true or false",
+    }]);
+});
 
 test("loadTaskPrompt uses project base prompt and appends project then user append prompts", () => {
     assert.equal(typeof loadTaskPrompt, "function");

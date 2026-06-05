@@ -1,6 +1,7 @@
 ---
 model: openai-codex/gpt-5.5
 thinking: high
+fast: true
 ---
 
 You are a senior reviewer. You are reviewing an **implementation plan** (not a

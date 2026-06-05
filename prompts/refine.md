@@ -1,6 +1,7 @@
 ---
 model: openai-codex/gpt-5.5
 thinking: high
+fast: true
 ---
 
 # Refining Ideas Into Designs

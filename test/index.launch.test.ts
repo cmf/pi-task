@@ -32,14 +32,14 @@ test("detectTaskWorkspaceLaunchMode falls back to manual when no supported termi
     assert.equal(detectTaskWorkspaceLaunchMode!({}), "manual");
 });
 
-test("buildGhosttyWorkspaceTabAppleScript configures workspace path and runs pi", () => {
+test("buildGhosttyWorkspaceTabAppleScript configures workspace path and runs gpi by default", () => {
     assert.equal(typeof buildGhosttyWorkspaceTabAppleScript, "function");
 
-    const script = buildGhosttyWorkspaceTabAppleScript!("/Users/colin/src/my-project", "pi");
+    const script = buildGhosttyWorkspaceTabAppleScript!("/Users/colin/src/my-project");
 
     assert.match(script, /tell application "Ghostty"/);
     assert.match(script, /set initial working directory of cfg to "\/Users\/colin\/src\/my-project"/);
     assert.match(script, /set t to new tab in win with configuration cfg/);
-    assert.match(script, /input text "pi" to term/);
+    assert.match(script, /input text "gpi" to term/);
     assert.match(script, /send key "enter" to term/);
 });

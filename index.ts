@@ -262,7 +262,7 @@ function escapeAppleScriptString(value: string): string {
     return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
 
-export function buildGhosttyWorkspaceTabAppleScript(workspacePath: string, command = "pi"): string {
+export function buildGhosttyWorkspaceTabAppleScript(workspacePath: string, command = "gpi"): string {
     const escapedWorkspacePath = escapeAppleScriptString(workspacePath);
     const escapedCommand = escapeAppleScriptString(command);
 
@@ -1564,6 +1564,30 @@ async function markWorkflowIssueInProgress(
     }
 }
 
+export function formatWorkflowIssueMarkdown(issue: {
+    title: string;
+    body: string;
+    comments?: Array<{body: string; authorLogin: string | null}>;
+}): string {
+    const parts = [`# ${issue.title}`];
+    const body = issue.body.trim();
+    if (body) {
+        parts.push("", body);
+    }
+
+    for (const comment of issue.comments ?? []) {
+        const commentBody = comment.body.trim();
+        if (!commentBody) {
+            continue;
+        }
+
+        const author = (comment.authorLogin?.trim() || "unknown author").replace(/\s+/g, " ");
+        parts.push("", `## Comment from ${author}`, "", commentBody);
+    }
+
+    return `${parts.join("\n")}\n`;
+}
+
 async function loadWorkflowIssueContent(
     pi: ExtensionAPI,
     cwd: string,
@@ -1585,12 +1609,7 @@ async function loadWorkflowIssueContent(
             return {error: `Issue #${issueNumber} not found`};
         }
 
-        const body = issue.body.trim();
-        const parts = [`# ${issue.title}`];
-        if (body) {
-            parts.push("", body);
-        }
-        return {content: `${parts.join("\n")}\n`};
+        return {content: formatWorkflowIssueMarkdown(issue)};
     } catch (error) {
         return {error: `Failed to show issue #${issueNumber}: ${error}`};
     }
@@ -3260,7 +3279,7 @@ async function runTaskWorkspace(
             return;
         }
 
-        const {frontmatter, body} = parseFrontmatter<Record<string, string>>(taskLoad.content);
+        const {frontmatter, body} = parseFrontmatter<Record<string, unknown>>(taskLoad.content);
         const trimmedBody = body.trim();
         if (!trimmedBody) {
             ctx.ui.notify(`Task prompt ${taskLoad.path} is empty`, "error");
@@ -3353,6 +3372,13 @@ async function runTaskWorkspace(
             return;
         }
         workflow = withPendingPromptRun.workflow;
+
+        applyTaskPromptFastMode(
+            pi,
+            (message, level) => ctx.ui.notify(message, level),
+            frontmatter,
+            taskLoad.path,
+        );
 
         const ran = await runTaskPrompt(pi, ctx, fullMessage);
         if (!ran) {
@@ -3884,11 +3910,11 @@ async function buildIssueContextMarkdownFromIds(
 async function applyTaskFrontmatter(
     pi: ExtensionAPI,
     ctx: ExtensionCommandContext,
-    frontmatter: Record<string, string>,
+    frontmatter: Record<string, unknown>,
     sourcePath: string
 ): Promise<void> {
     const modelName = frontmatter.model;
-    if (modelName) {
+    if (typeof modelName === "string" && modelName) {
         const resolved = resolveModelPattern(modelName, ctx.modelRegistry.getAll());
         if (!resolved) {
             ctx.ui.notify(`Unknown model "${modelName}" in ${sourcePath}`, "error");
@@ -3901,7 +3927,7 @@ async function applyTaskFrontmatter(
     }
 
     const thinking = frontmatter.thinking;
-    if (thinking) {
+    if (typeof thinking === "string" && thinking) {
         const normalized = thinking.trim().toLowerCase();
         const allowed = new Set(["off", "minimal", "low", "medium", "high"]);
         if (!allowed.has(normalized)) {
@@ -3910,6 +3936,55 @@ async function applyTaskFrontmatter(
             pi.setThinkingLevel(normalized as "off" | "minimal" | "low" | "medium" | "high");
         }
     }
+}
+
+type TaskPromptFastModePi = {
+    events?: {
+        emit: (event: string, payload: unknown) => void;
+    };
+};
+
+type TaskPromptFastModeNotify = (message: string, level: "info" | "warning" | "error") => void;
+
+function parseTaskPromptFastValue(value: unknown): {enabled: boolean} | {error: string} {
+    if (value === true || value === false) {
+        return {enabled: value};
+    }
+
+    if (typeof value === "string") {
+        const normalized = value.trim().toLowerCase();
+        if (normalized === "true") {
+            return {enabled: true};
+        }
+        if (normalized === "false") {
+            return {enabled: false};
+        }
+    }
+
+    return {error: `Invalid fast value "${String(value)}"`};
+}
+
+export function applyTaskPromptFastMode(
+    pi: TaskPromptFastModePi,
+    notify: TaskPromptFastModeNotify,
+    frontmatter: Record<string, unknown>,
+    sourcePath: string,
+): void {
+    if (!Object.prototype.hasOwnProperty.call(frontmatter, "fast")) {
+        return;
+    }
+
+    const parsed = parseTaskPromptFastValue(frontmatter.fast);
+    if ("error" in parsed) {
+        notify(`${parsed.error} in ${sourcePath}; expected true or false`, "error");
+        return;
+    }
+
+    pi.events?.emit("pi-codex:fast:set", {
+        enabled: parsed.enabled,
+        source: "pi-task",
+        notify: true,
+    });
 }
 
 function resolveModelPattern(modelName: string, models: AvailableModel[]): AvailableModel | undefined {
@@ -4133,7 +4208,7 @@ async function selectAndStartTask(
     }
 
     if (launchMode === "ghostty") {
-        const ghosttyResult = await pi.exec("osascript", ["-e", buildGhosttyWorkspaceTabAppleScript(wsPath, "pi")]);
+        const ghosttyResult = await pi.exec("osascript", ["-e", buildGhosttyWorkspaceTabAppleScript(wsPath)]);
         if (ghosttyResult.code === 0) {
             ctx.ui.notify(`Opened Ghostty tab: ${slug}`, "info");
             return;
