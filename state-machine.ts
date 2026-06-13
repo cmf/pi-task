@@ -1,4 +1,4 @@
-import {parseFrontmatter} from "@earendil-works/pi-coding-agent";
+import {parse as parseYaml} from "yaml";
 
 /**
  * Explicit task workflow state machine used by the task extension shell (index.ts).
@@ -60,6 +60,7 @@ export type WorkflowEffect =
     parentTaskId: string;
     title: string;
     description: string;
+    tdd: boolean;
     /**
      * Idempotency key used by the shell/interpreter to avoid duplicate issues.
      * Suggested semantics: unique on (parentTaskId, title).
@@ -444,6 +445,9 @@ export function transition(snapshot: WorkflowSnapshot, event: WorkflowEvent): Tr
 
         case "review": {
             switch (parsed.requestedState) {
+                case null:
+                    return ignored(snapshot, event); // Clarifying-question turns
+
                 case "subtask-commit":
                     return move(snapshot, "subtask-commit", {type: "current"});
 
@@ -615,6 +619,7 @@ function toCreateIssueEffects(parentTaskId: string, drafts: IssueDraft[]): Workf
         parentTaskId,
         title: draft.title,
         description: draft.description,
+        tdd: draft.tdd,
         idempotencyKey: `${parentTaskId}::${draft.title}`,
     }));
 }
@@ -740,10 +745,6 @@ function parseCommitMessageFromAssistantMessage(messageText: string): string | n
 
 function appendFixesLineFromRootDescription(commitMessage: string, rootIssueMarkdown: string): string {
     const normalizedCommitMessage = normalizeNewlines(commitMessage).trim();
-    if (!normalizedCommitMessage.includes("\n")) {
-        return normalizedCommitMessage;
-    }
-
     const fixesReference = extractFixesReferenceFromRootDescription(rootIssueMarkdown);
     if (!fixesReference) {
         return normalizedCommitMessage;
@@ -825,8 +826,7 @@ function extractTaggedYamlBlock(text: string, tagName: string): string | null {
 }
 
 function parseYamlDocument(yamlString: string): unknown {
-    const wrapped = `---\n${yamlString}\n---`;
-    return parseFrontmatter(wrapped).frontmatter as unknown;
+    return parseYaml(yamlString) as unknown;
 }
 
 function normalizeNewlines(value: string): string {

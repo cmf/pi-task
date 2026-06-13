@@ -41,6 +41,10 @@ test("parseTaskApplyArgs rejects missing or invalid numbered findings", () => {
     assert.deepEqual(parseTaskApplyArgs("3-1"), {error: "Finding ranges must be ascending: 3-1"});
 });
 
+test("parseTaskApplyArgs caps total selected findings", () => {
+    assert.deepEqual(parseTaskApplyArgs("1-51"), {error: "Cannot apply more than 50 findings at once."});
+});
+
 test("buildTaskApplyPrompt tells the agent to use current issue content as authoritative", () => {
     const prompt = buildTaskApplyPrompt({
         finding: "2",

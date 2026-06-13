@@ -1,13 +1,19 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 import {
     buildTaskBranchRevsetFromTaskHeadCommit,
     completionReadyToMergeNotice,
+    createTaskWorkspaceParentDirectory,
     findPendingPromptRunCompletionCandidate,
     inProgressRootIssueIdFromWorkflow,
     normalizeSessionFilePath,
     parseOriginRemoteUrlFromJjGitRemoteListOutput,
+    resolveChildLookupForCreateOrReuse,
+    resolveEditorDialogValue,
     resolveEditorPrefillValue,
     shouldNotifyPendingTransitionOutsideTaskLoop,
 } from "../index.js";
@@ -267,6 +273,48 @@ test("resolveEditorPrefillValue falls back to default on undefined", () => {
         resolveEditorPrefillValue(undefined, "default-value"),
         "default-value",
     );
+});
+
+test("resolveEditorDialogValue treats dismissed editor as cancelled", () => {
+    assert.deepEqual(
+        resolveEditorDialogValue(undefined, "default-value"),
+        {cancelled: true},
+    );
+});
+
+test("resolveEditorDialogValue keeps blank accepted editor as default", () => {
+    assert.deepEqual(
+        resolveEditorDialogValue("   ", "default-value"),
+        {cancelled: false, value: "default-value"},
+    );
+});
+
+test("resolveChildLookupForCreateOrReuse propagates lookup errors instead of creating duplicates", () => {
+    assert.deepEqual(
+        resolveChildLookupForCreateOrReuse({error: "GitHub query failed: boom"}),
+        {error: "GitHub query failed: boom"},
+    );
+});
+
+test("resolveChildLookupForCreateOrReuse reuses existing child ids", () => {
+    assert.deepEqual(
+        resolveChildLookupForCreateOrReuse({item: {id: "123"}}),
+        {id: "123"},
+    );
+});
+
+test("createTaskWorkspaceParentDirectory reports mkdir failures", () => {
+    const temp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-task-parent-dir-test-"));
+    const blockingFile = path.join(temp, "blocking-file");
+    fs.writeFileSync(blockingFile, "not a directory", "utf-8");
+
+    try {
+        const result = createTaskWorkspaceParentDirectory(path.join(blockingFile, "repo"));
+        assert.equal(result.ok, false);
+        assert.match(result.error, /Failed to create workspace parent directory/);
+    } finally {
+        fs.rmSync(temp, {recursive: true, force: true});
+    }
 });
 
 test("resolveEditorPrefillValue falls back to default on blank input", () => {

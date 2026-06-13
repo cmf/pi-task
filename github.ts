@@ -29,6 +29,7 @@ export type GitHubIssueComment = {
 
 export type GitHubIssueDetail = GitHubIssueSummary & {
     comments: GitHubIssueComment[];
+    commentsTruncated: boolean;
 };
 
 type GraphQLResponse<T> = {
@@ -184,23 +185,99 @@ async function graphql<T>(
     query: string,
     variables?: Record<string, unknown>
 ): Promise<T> {
-    const token = getToken(config);
-    const response = await fetch(config.endpoint ?? DEFAULT_ENDPOINT, {
-        method: "POST",
-        headers: {
-            "content-type": "application/json",
-            authorization: `Bearer ${token}`,
-            "user-agent": config.userAgent ?? DEFAULT_USER_AGENT,
-        },
-        body: JSON.stringify({query, variables}),
-    });
+    const isMutation = /\bmutation\b/i.test(query);
+    const maxAttempts = isMutation ? 2 : 3;
+    let lastError: GitHubGraphQLError | null = null;
 
-    const payload = (await response.json()) as GraphQLResponse<T>;
-    if (!response.ok || (payload.errors && payload.errors.length > 0) || !payload.data) {
-        throw new GitHubGraphQLError(response.status, payload.errors ?? [{message: "Unknown GraphQL error"}]);
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        const response = await fetch(config.endpoint ?? DEFAULT_ENDPOINT, {
+            method: "POST",
+            headers: {
+                "content-type": "application/json",
+                authorization: `Bearer ${getToken(config)}`,
+                "user-agent": config.userAgent ?? DEFAULT_USER_AGENT,
+            },
+            body: JSON.stringify({query, variables}),
+        });
+
+        const contentType = response.headers.get("content-type") ?? "";
+        let payload: GraphQLResponse<T> | null = null;
+        if (contentType.toLowerCase().includes("application/json")) {
+            try {
+                payload = (await response.json()) as GraphQLResponse<T>;
+            } catch (error) {
+                lastError = new GitHubGraphQLError(response.status, [{message: `Invalid JSON GitHub GraphQL response: ${error}`}]);
+                if (attempt < maxAttempts && shouldRetryGraphQLResponse(response.status, lastError.errors, response.headers)) {
+                    await sleep(retryDelayMs(attempt, response.headers));
+                    continue;
+                }
+                throw lastError;
+            }
+        } else {
+            const body = await response.text();
+            lastError = new GitHubGraphQLError(response.status, [{
+                message: `Non-JSON GitHub GraphQL response (status ${response.status}, content-type ${contentType || "unknown"}): ${bodySnippet(body)}`,
+            }]);
+            if (attempt < maxAttempts && shouldRetryGraphQLResponse(response.status, lastError.errors, response.headers)) {
+                await sleep(retryDelayMs(attempt, response.headers));
+                continue;
+            }
+            throw lastError;
+        }
+
+        const errors = payload.errors ?? [];
+        if (!response.ok || errors.length > 0 || !payload.data) {
+            lastError = new GitHubGraphQLError(response.status, errors.length > 0 ? errors : [{message: "Unknown GraphQL error"}]);
+            if (attempt < maxAttempts && shouldRetryGraphQLResponse(response.status, lastError.errors, response.headers)) {
+                await sleep(retryDelayMs(attempt, response.headers));
+                continue;
+            }
+            throw lastError;
+        }
+
+        return payload.data;
     }
 
-    return payload.data;
+    throw lastError ?? new GitHubGraphQLError(0, [{message: "GitHub GraphQL request failed"}]);
+}
+
+function bodySnippet(body: string): string {
+    return body.replace(/\s+/g, " ").trim().slice(0, 500) || "(empty body)";
+}
+
+function shouldRetryGraphQLResponse(
+    status: number,
+    errors: Array<{message: string}>,
+    headers: Headers,
+): boolean {
+    if (status === 502 || status === 503) {
+        return true;
+    }
+
+    if (status !== 403) {
+        return false;
+    }
+
+    if (headers.get("retry-after")) {
+        return true;
+    }
+
+    return errors.some((error) => /abuse|secondary rate|secondary-rate|rate limit/i.test(error.message));
+}
+
+function retryDelayMs(attempt: number, headers: Headers): number {
+    const retryAfter = headers.get("retry-after");
+    if (retryAfter) {
+        const seconds = Number(retryAfter);
+        if (Number.isFinite(seconds) && seconds >= 0) {
+            return Math.min(seconds * 1000, 1000);
+        }
+    }
+    return Math.min(25 * attempt, 100);
+}
+
+function sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export async function getRepositoryId(config: GitHubClientConfig): Promise<string> {
@@ -248,6 +325,7 @@ export async function getIssueByNumber(
                         createdAt: string;
                         author?: {login?: string | null} | null;
                     } | null> | null;
+                    pageInfo?: PageInfo;
                 } | null;
             }) | null;
         } | null;
@@ -282,6 +360,10 @@ export async function getIssueByNumber(
                                 login
                             }
                         }
+                        pageInfo {
+                            hasNextPage
+                            endCursor
+                        }
                     }
                 }
             }
@@ -312,6 +394,7 @@ export async function getIssueByNumber(
     return {
         ...summary,
         comments,
+        commentsTruncated: issueNode.comments?.pageInfo?.hasNextPage === true,
     };
 }
 
@@ -560,6 +643,94 @@ export async function addIssueComment(
     };
 }
 
+export async function listOpenRootIssues(
+    config: GitHubClientConfig,
+    options?: {
+        pageSize?: number;
+        orderDirection?: "ASC" | "DESC";
+    }
+): Promise<GitHubIssueSummary[]> {
+    const pageSize = Math.max(1, Math.min(options?.pageSize ?? DEFAULT_PAGE_SIZE, 100));
+    const direction = options?.orderDirection ?? "ASC";
+
+    const items: GitHubIssueSummary[] = [];
+    let after: string | null = null;
+
+    while (true) {
+        const data: ListIssuesResponse = await graphql<ListIssuesResponse>(
+            config,
+            `query ListOpenRootIssues(
+                $owner: String!,
+                $repo: String!,
+                $first: Int!,
+                $after: String,
+                $direction: OrderDirection!
+            ) {
+                repository(owner: $owner, name: $repo) {
+                    issues(
+                        states: [OPEN],
+                        first: $first,
+                        after: $after,
+                        orderBy: {field: CREATED_AT, direction: $direction}
+                    ) {
+                        nodes {
+                            id
+                            number
+                            title
+                            state
+                            createdAt
+                            closedAt
+                            parent {
+                                id
+                                number
+                                title
+                            }
+                            # Labels are intentionally capped at 50; workflow status uses a single
+                            # controlled label, so exceeding this cap is not expected in practice.
+                            labels(first: 50) {
+                                nodes {
+                                    name
+                                }
+                            }
+                        }
+                        pageInfo {
+                            hasNextPage
+                            endCursor
+                        }
+                    }
+                }
+            }`,
+            {
+                owner: config.owner,
+                repo: config.repo,
+                first: pageSize,
+                after,
+                direction,
+            }
+        );
+
+        const repository = data.repository;
+        if (!repository) {
+            break;
+        }
+
+        const issues = repository.issues;
+        const mapped = (issues.nodes ?? [])
+            .filter((node: RawIssueNode | null): node is RawIssueNode => Boolean(node))
+            .filter((node: RawIssueNode) => !node.parent)
+            .map((node: RawIssueNode) => mapIssueNode(node));
+        items.push(...mapped);
+
+        if (!issues.pageInfo.hasNextPage || !issues.pageInfo.endCursor) {
+            break;
+        }
+
+        after = issues.pageInfo.endCursor;
+    }
+
+    return items;
+}
+
 export async function listIssues(
     config: GitHubClientConfig,
     options?: {
@@ -730,7 +901,7 @@ export async function findChildIssueByExactTitle(
     }
 ): Promise<GitHubIssueSummary | null> {
     const children = await listSubIssues(config, params.parentIssueId);
-    return children.find((issue) => issue.title === params.title) ?? null;
+    return children.find((issue) => issue.state === "OPEN" && issue.title === params.title) ?? null;
 }
 
 export async function ensureLabel(

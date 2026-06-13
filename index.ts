@@ -33,7 +33,7 @@ import {
     createIssueWithParent,
     findChildIssueByExactTitle,
     getIssueByNumber,
-    listIssues,
+    listOpenRootIssues,
     markIssueInProgressWithLabel,
     updateIssueBody,
     GitHubSubIssueLinkError,
@@ -50,9 +50,10 @@ const WORKFLOW_SCHEMA_VERSION = 1;
 const WORKFLOW_DIR_NAME = ".tasks";
 const WORKFLOW_FILE_NAME = "workflow.json";
 const UNBOUND_SESSION_LEAF_ID = "unbound";
-const ENABLE_TRANSITION_DEBUG = true;
+const ENABLE_TRANSITION_DEBUG = process.env.PI_TASK_DEBUG === "1";
 const DEFAULT_GITHUB_TOKEN_PATH = path.join(os.homedir(), ".api-keys", "github-tasks");
 const IN_PROGRESS_LABEL = "status:in-progress";
+const githubConfigCache = new Map<string, GitHubClientConfig>();
 
 const TASK_ISSUE_SECTION_HEADERS = {
     plan: "## Plan",
@@ -248,6 +249,21 @@ export function resolveEditorPrefillValue(
     return firstNonEmptyLine ?? defaultValue;
 }
 
+export function resolveEditorDialogValue(
+    input: string | undefined,
+    defaultValue: string,
+    options?: {singleLine?: boolean},
+): {cancelled: true} | {cancelled: false; value: string} {
+    if (input === undefined) {
+        return {cancelled: true};
+    }
+
+    return {
+        cancelled: false,
+        value: resolveEditorPrefillValue(input, defaultValue, options),
+    };
+}
+
 export function detectTaskWorkspaceLaunchMode(env: Record<string, string | undefined>): "tmux" | "ghostty" | "manual" {
     if (env.TMUX) {
         return "tmux";
@@ -397,6 +413,7 @@ export function upsertMarkdownSection(existingBody: string, header: string, cont
 type TaskApplyArgs = {findings: string[]; instruction?: string};
 
 const TASK_APPLY_USAGE = "Usage: /task apply <finding-number-or-range> [finding-number-or-range ...] [instruction]";
+const TASK_APPLY_MAX_FINDINGS = 50;
 
 export function parseTaskApplyArgs(args: string): TaskApplyArgs | {error: string} {
     const trimmed = args.trim();
@@ -448,11 +465,17 @@ export function parseTaskApplyArgs(args: string): TaskApplyArgs | {error: string
                 }
                 for (let finding = start; finding <= end; finding += 1) {
                     addFinding(finding);
+                    if (findings.length > TASK_APPLY_MAX_FINDINGS) {
+                        return {error: `Cannot apply more than ${TASK_APPLY_MAX_FINDINGS} findings at once.`};
+                    }
                 }
                 continue;
             }
 
             addFinding(Number(part));
+            if (findings.length > TASK_APPLY_MAX_FINDINGS) {
+                return {error: `Cannot apply more than ${TASK_APPLY_MAX_FINDINGS} findings at once.`};
+            }
         }
     }
 
@@ -557,6 +580,7 @@ export interface TaskApplyIterationDeps {
     waitForIdle: () => Promise<void>;
     navigateToBase: (baseLeafId: string, finding: string) => Promise<{cancelled: boolean}>;
     loadRootIssueMarkdown: () => Promise<{content: string} | {error: string}>;
+    loadRootIssueBodyMarkdown?: () => Promise<{content: string} | {error: string}>;
     runPrompt: (prompt: string, finding: string) => Promise<{assistantMessage: string; assistantMessageId: string | null} | {error: string}>;
     consumeAssistantMessage: (assistantMessageId: string | null) => Promise<{ok: true} | {error: string}>;
     notify: (message: string, level: TaskApplyNotifyLevel) => void;
@@ -589,6 +613,14 @@ export async function runTaskApplyIterations(params: TaskApplyIterationDeps): Pr
             return false;
         }
 
+        const beforeIssueBody = params.loadRootIssueBodyMarkdown
+            ? await params.loadRootIssueBodyMarkdown()
+            : beforeIssue;
+        if ("error" in beforeIssueBody) {
+            params.notify(beforeIssueBody.error, "error");
+            return false;
+        }
+
         const promptResult = await params.runPrompt(buildTaskApplyPrompt({
             finding,
             instruction: params.instruction,
@@ -617,13 +649,15 @@ export async function runTaskApplyIterations(params: TaskApplyIterationDeps): Pr
             return false;
         }
 
-        const afterIssue = await params.loadRootIssueMarkdown();
-        if ("error" in afterIssue) {
-            params.notify(afterIssue.error, "error");
+        const afterIssueBody = params.loadRootIssueBodyMarkdown
+            ? await params.loadRootIssueBodyMarkdown()
+            : await params.loadRootIssueMarkdown();
+        if ("error" in afterIssueBody) {
+            params.notify(afterIssueBody.error, "error");
             return false;
         }
 
-        if (afterIssue.content === beforeIssue.content) {
+        if (afterIssueBody.content === beforeIssueBody.content) {
             unchangedFindings.push(finding);
             params.notify(`No root issue change detected after applying finding ${finding}.`, "warning");
         } else {
@@ -681,6 +715,12 @@ async function resolveGitHubClientConfig(
     pi: ExtensionAPI,
     root: string,
 ): Promise<{config: GitHubClientConfig} | {error: string}> {
+    const cacheKey = path.resolve(root);
+    const cached = githubConfigCache.get(cacheKey);
+    if (cached) {
+        return {config: cached};
+    }
+
     const envRepo = (process.env.GITHUB_REPOSITORY ?? process.env.GH_REPO ?? "").trim();
     let owner = "";
     let repo = "";
@@ -772,13 +812,13 @@ async function resolveGitHubClientConfig(
         };
     }
 
-    return {
-        config: {
-            owner,
-            repo,
-            token,
-        },
+    const config = {
+        owner,
+        repo,
+        token,
     };
+    githubConfigCache.set(cacheKey, config);
+    return {config};
 }
 
 function taskIssueSectionHeader(section: TaskIssueSection): string {
@@ -1417,8 +1457,7 @@ async function listWorkflowIssueSummaries(
     }
 
     try {
-        const issues = await listIssues(configResult.config, {
-            states: ["OPEN", "CLOSED"],
+        const issues = await listOpenRootIssues(configResult.config, {
             orderDirection: "ASC",
         });
         return {items: issues.map((issue) => toWorkflowIssueSummary(issue))};
@@ -1465,6 +1504,7 @@ async function createChildIssue(
     cwd: string,
     title: string,
     description: string,
+    tdd: boolean,
     parentId: string,
 ): Promise<{id: string} | {error: string}> {
     const parentNumber = parseIssueNumberFromTaskId(parentId);
@@ -1486,7 +1526,7 @@ async function createChildIssue(
         const created = await createIssueWithParent(configResult.config, {
             parentIssueId: parent.id,
             title,
-            body: description,
+            body: formatCreatedChildIssueBody(description, tdd),
         });
 
         return {id: String(created.number)};
@@ -1530,6 +1570,8 @@ async function closeWorkflowIssue(
         if (!issue) {
             return {ok: false, error: `Issue #${issueNumber} not found`};
         }
+        // The status:in-progress label is left in place when closing; GitHub's CLOSED
+        // state is treated as the authoritative workflow status.
         await closeGitHubIssue(configResult.config, issue.id);
         return {ok: true};
     } catch (error) {
@@ -1564,16 +1606,42 @@ async function markWorkflowIssueInProgress(
     }
 }
 
-export function formatWorkflowIssueMarkdown(issue: {
+const TDD_FALSE_MARKER = "<!-- tdd: false -->";
+
+export function formatCreatedChildIssueBody(description: string, tdd: boolean): string {
+    return formatReusedChildIssueBody(description, tdd);
+}
+
+export function formatReusedChildIssueBody(existingBody: string, tdd: boolean): string {
+    const body = existingBody.trim();
+    if (tdd) {
+        return body.split(TDD_FALSE_MARKER).join("").trim();
+    }
+    if (body.includes(TDD_FALSE_MARKER)) {
+        return body;
+    }
+    return body ? `${body}\n\n${TDD_FALSE_MARKER}` : TDD_FALSE_MARKER;
+}
+
+export function formatWorkflowIssueBodyMarkdown(issue: {
     title: string;
     body: string;
-    comments?: Array<{body: string; authorLogin: string | null}>;
 }): string {
     const parts = [`# ${issue.title}`];
     const body = issue.body.trim();
     if (body) {
         parts.push("", body);
     }
+    return `${parts.join("\n")}\n`;
+}
+
+export function formatWorkflowIssueMarkdown(issue: {
+    title: string;
+    body: string;
+    comments?: Array<{body: string; authorLogin: string | null}>;
+    commentsTruncated?: boolean;
+}): string {
+    const parts = [formatWorkflowIssueBodyMarkdown(issue).trimEnd()];
 
     for (const comment of issue.comments ?? []) {
         const commentBody = comment.body.trim();
@@ -1585,13 +1653,18 @@ export function formatWorkflowIssueMarkdown(issue: {
         parts.push("", `## Comment from ${author}`, "", commentBody);
     }
 
+    if (issue.commentsTruncated) {
+        parts.push("", "## Comments truncated", "", "Additional GitHub comments were not loaded into this context.");
+    }
+
     return `${parts.join("\n")}\n`;
 }
 
-async function loadWorkflowIssueContent(
+async function loadWorkflowIssueMarkdown(
     pi: ExtensionAPI,
     cwd: string,
     taskId: string,
+    includeComments: boolean,
 ): Promise<{content: string} | {error: string}> {
     const issueNumber = parseIssueNumberFromTaskId(taskId);
     if (!issueNumber) {
@@ -1609,7 +1682,7 @@ async function loadWorkflowIssueContent(
             return {error: `Issue #${issueNumber} not found`};
         }
 
-        return {content: formatWorkflowIssueMarkdown(issue)};
+        return {content: includeComments ? formatWorkflowIssueMarkdown(issue) : formatWorkflowIssueBodyMarkdown(issue)};
     } catch (error) {
         return {error: `Failed to show issue #${issueNumber}: ${error}`};
     }
@@ -1904,10 +1977,6 @@ function buildTransitionedWorkflow(
         at: draft.updated_at,
     };
 
-    if (draft.version !== workflow.version + 1) {
-        return {error: "workflow version must increment exactly once per transition"};
-    }
-
     const error = validateWorkflow(draft);
     if (error) {
         return {error: `Transition violates workflow invariants: ${error}`};
@@ -1916,19 +1985,76 @@ function buildTransitionedWorkflow(
     return {workflow: draft};
 }
 
+async function ensureReusedChildIssueTddMarker(
+    pi: ExtensionAPI,
+    root: string,
+    childTaskId: string,
+    tdd: boolean,
+): Promise<{ok: true} | {error: string}> {
+    if (tdd) {
+        return {ok: true};
+    }
+
+    const issueNumber = parseIssueNumberFromTaskId(childTaskId);
+    if (!issueNumber) {
+        return {error: `Invalid child issue id: ${childTaskId}`};
+    }
+
+    const configResult = await resolveGitHubClientConfig(pi, root);
+    if ("error" in configResult) {
+        return {error: configResult.error};
+    }
+
+    try {
+        const issue = await getIssueByNumber(configResult.config, issueNumber);
+        if (!issue) {
+            return {error: `Issue #${issueNumber} not found`};
+        }
+
+        const nextBody = formatReusedChildIssueBody(issue.body, tdd);
+        if (nextBody !== issue.body) {
+            await updateIssueBody(configResult.config, issue.id, nextBody);
+        }
+        return {ok: true};
+    } catch (error) {
+        return {error: `Failed to update reused child issue #${issueNumber}: ${error}`};
+    }
+}
+
+export function resolveChildLookupForCreateOrReuse(
+    existingResult: {item: {id: string} | null} | {error: string},
+): {id: string} | {create: true} | {error: string} {
+    if ("error" in existingResult) {
+        return {error: existingResult.error};
+    }
+    if (existingResult.item) {
+        return {id: existingResult.item.id};
+    }
+    return {create: true};
+}
+
 async function createOrReuseChildTask(
     pi: ExtensionAPI,
     root: string,
     parentId: string,
     title: string,
     description: string,
+    tdd: boolean,
 ): Promise<{id: string} | {error: string}> {
     const existingResult = await findChildIssueByParentAndTitle(pi, root, parentId, title);
-    if (!("error" in existingResult) && existingResult.item) {
-        return {id: existingResult.item.id};
+    const existingDecision = resolveChildLookupForCreateOrReuse(existingResult);
+    if ("error" in existingDecision) {
+        return {error: existingDecision.error};
+    }
+    if ("id" in existingDecision) {
+        const marked = await ensureReusedChildIssueTddMarker(pi, root, existingDecision.id, tdd);
+        if ("error" in marked) {
+            return {error: marked.error};
+        }
+        return {id: existingDecision.id};
     }
 
-    const created = await createChildIssue(pi, root, title, description, parentId);
+    const created = await createChildIssue(pi, root, title, description, tdd, parentId);
     if ("error" in created) {
         return {error: `Failed to create child task \"${title}\": ${created.error}`};
     }
@@ -2110,7 +2236,7 @@ async function withRequiredRootIssueMarkdown(
         return {event};
     }
 
-    const loaded = await loadIssueMarkdown(pi, root, workflow.task_id);
+    const loaded = await loadIssueBodyMarkdown(pi, root, workflow.task_id);
     if ("error" in loaded) {
         return {error: loaded.error};
     }
@@ -2142,6 +2268,8 @@ function applyCreatedChildrenToTree(workflow: PersistedWorkflow, createdChildren
         if (!parentNode) {
             throw new Error(`Parent task not found while applying CREATE_ISSUE effects: ${parentTaskId}`);
         }
+        // CREATE_ISSUE effects represent the machine-approved child list for this transition.
+        // Replace, do not append, so retries remain deterministic and do not preserve stale children.
         parentNode.subtasks = children.map(cloneTaskNode);
     }
 }
@@ -2259,6 +2387,7 @@ async function interpretMachineEffects(
                 effect.parentTaskId,
                 effect.title,
                 effect.description,
+                effect.tdd,
             );
             if ("error" in created) {
                 return {error: created.error};
@@ -2547,6 +2676,10 @@ async function maybeNotifyPendingTransitionOutsideTaskLoop(
     }
 
     const cwd = ctx.sessionManager.getCwd();
+    if (!isUnderTaskWorkspacesDirectory(cwd)) {
+        return;
+    }
+
     const jjRootResult = await pi.exec("jj", ["root"], {cwd});
     if (jjRootResult.code !== 0) {
         return;
@@ -2902,6 +3035,7 @@ async function markImplementationDone(
     }
 
     const workflow = loaded.workflow;
+    const latestAssistantMessageId = getLastAssistantMessage(ctx)?.id ?? null;
     const result = await dispatchWorkflowEvent(pi, ctx, root, workflow, {
         type: "MANUAL_DONE",
         completedState: workflow.state,
@@ -2915,7 +3049,13 @@ async function markImplementationDone(
         return false;
     }
 
-    const clearedPending = persistPendingPromptRun(root, result.workflow, null);
+    const consumed = persistConsumedAssistantMessageId(root, result.workflow, latestAssistantMessageId);
+    if ("error" in consumed) {
+        ctx.ui.notify(consumed.error, "error");
+        return false;
+    }
+
+    const clearedPending = persistPendingPromptRun(root, consumed.workflow, null);
     if ("error" in clearedPending) {
         ctx.ui.notify(clearedPending.error, "error");
         return false;
@@ -2966,6 +3106,7 @@ async function applyReviewPlanFindings(
             label: `task-apply-${finding}`,
         }),
         loadRootIssueMarkdown: () => loadIssueMarkdown(pi, root, workflow.task_id),
+        loadRootIssueBodyMarkdown: () => loadIssueBodyMarkdown(pi, root, workflow.task_id),
         runPrompt: async (prompt) => {
             const previousAssistantId = getLastAssistantMessage(ctx)?.id ?? null;
             const ran = await runTaskPrompt(pi, ctx, prompt);
@@ -3388,6 +3529,7 @@ async function runTaskWorkspace(
         await waitForNewAssistantMessage(ctx, previousAssistantId);
 
         if (agentEndLooksLikeErrorFromSession(ctx)) {
+            ctx.ui.notify("Agent turn ended with an error; fix the issue and run /task to resume.", "warning");
             return;
         }
 
@@ -3701,7 +3843,12 @@ async function mergeDoneTaskWorkspace(
     }
 
     const messageInput = await ctx.ui.editor("Squash merge commit message:", defaultMessage);
-    const message = resolveEditorPrefillValue(messageInput, defaultMessage);
+    const messageResult = resolveEditorDialogValue(messageInput, defaultMessage);
+    if (messageResult.cancelled) {
+        ctx.ui.notify("Squash merge cancelled.", "info");
+        return false;
+    }
+    const message = messageResult.value;
 
     // Create a single squashed commit after @- containing all task changes.
     // `-A @-` also rebases children of @- (including @) onto the new squashed commit,
@@ -3876,7 +4023,17 @@ function formatReadyIssueLine(issue: ReadyIssue): string {
 async function loadIssueMarkdown(pi: ExtensionAPI, cwd: string, id: string): Promise<{ content: string } | {
     error: string
 }> {
-    const showResult = await loadWorkflowIssueContent(pi, cwd, id);
+    const showResult = await loadWorkflowIssueMarkdown(pi, cwd, id, true);
+    if ("error" in showResult) {
+        return {error: `Failed to read issue ${id}: ${showResult.error}`};
+    }
+    return {content: showResult.content};
+}
+
+async function loadIssueBodyMarkdown(pi: ExtensionAPI, cwd: string, id: string): Promise<{ content: string } | {
+    error: string
+}> {
+    const showResult = await loadWorkflowIssueMarkdown(pi, cwd, id, false);
     if ("error" in showResult) {
         return {error: `Failed to read issue ${id}: ${showResult.error}`};
     }
@@ -4103,7 +4260,7 @@ async function selectAndStartTask(
         return;
     }
 
-    // Parse the issue ID and title from the selection (format: "tp-xxxx  [P2][open] - Title")
+    // Parse the issue ID and title from the selection (format: "123      [open] - Title")
     const issueId = selection.split(/\s+/)[0];
     if (!issueId) {
         ctx.ui.notify("Failed to parse issue ID", "error");
@@ -4117,7 +4274,12 @@ async function selectAndStartTask(
     // Create slug from title
     const slugDefault = slugify(issueTitle);
     const slugInput = await ctx.ui.editor("Task slug:", slugDefault);
-    const slug = resolveEditorPrefillValue(slugInput, slugDefault, {singleLine: true});
+    const slugResult = resolveEditorDialogValue(slugInput, slugDefault, {singleLine: true});
+    if (slugResult.cancelled) {
+        ctx.ui.notify("Task start cancelled.", "info");
+        return;
+    }
+    const slug = slugResult.value;
 
     // Create task ID with timestamp (needed for commit message)
     const taskId = `${formatTaskIdTimestamp(new Date())}-${slug}`;
@@ -4126,11 +4288,21 @@ async function selectAndStartTask(
     const repo = path.basename(root);
     const wsPath = path.join(os.homedir(), ".workspaces", taskId, repo);
 
-    // Create parent directory
-    fs.mkdirSync(path.dirname(wsPath), {recursive: true});
+    // Mark the issue before creating local workspace state, so GitHub failures do not leave
+    // a half-initialized jj workspace behind.
+    const startResult = await markWorkflowIssueInProgress(pi, root, issueId);
+    if (startResult.ok === false) {
+        ctx.ui.notify(`Failed to set issue to in_progress: ${startResult.error}`, "error");
+        return;
+    }
 
-    // Create jj workspace from the current working copy commit
-    // (using @ instead of @- so that newly created issues are included)
+    const parentDirectory = createTaskWorkspaceParentDirectory(wsPath);
+    if (parentDirectory.ok === false) {
+        ctx.ui.notify(formatWorkspaceCreationFailureMessage(parentDirectory.error), "error");
+        return;
+    }
+
+    // Create jj workspace from the current working copy commit.
     const wsAddResult = await pi.exec("jj", [
         "workspace", "add",
         "--name", taskId,
@@ -4139,7 +4311,7 @@ async function selectAndStartTask(
     ]);
 
     if (wsAddResult.code !== 0) {
-        ctx.ui.notify(`Failed to create workspace: ${wsAddResult.stderr}`, "error");
+        ctx.ui.notify(formatWorkspaceCreationFailureMessage(wsAddResult.stderr), "error");
         return;
     }
 
@@ -4176,14 +4348,6 @@ async function selectAndStartTask(
         }
     }
 
-    // Set the issue to in_progress in the task workspace
-    // Use main workspace root for repo detection; fresh jj workspaces may not have a local .git remote config yet.
-    const startResult = await markWorkflowIssueInProgress(pi, root, issueId);
-    if (startResult.ok === false) {
-        ctx.ui.notify(`Failed to set issue to in_progress: ${startResult.error}`, "error");
-        return;
-    }
-
     const initialWorkflow = createInitialWorkflow(
         issueId,
         issueTitle,
@@ -4191,7 +4355,7 @@ async function selectAndStartTask(
     );
     const savedWorkflow = saveWorkflowAtomic(wsPath, initialWorkflow);
     if (savedWorkflow.ok === false) {
-        ctx.ui.notify(`Failed to initialize workflow file: ${savedWorkflow.error}`, "error");
+        ctx.ui.notify(`Failed to initialize workflow file: ${savedWorkflow.error}. Remove the partial workspace with /task delete.`, "error");
         return;
     }
     ctx.ui.notify(`Initialized workflow file: ${getWorkflowPath(wsPath)}`, "info");
@@ -4219,6 +4383,28 @@ async function selectAndStartTask(
     }
 
     ctx.ui.notify(`Next: cd ${wsPath} && pi`, "info");
+}
+
+export function formatWorkspaceCreationFailureMessage(stderr: string): string {
+    const details = stderr.trim() || "unknown error";
+    return `Failed to create workspace: ${details}. If a partial task workspace exists, remove it with /task delete. The GitHub issue may still have the ${IN_PROGRESS_LABEL} label; remove that label manually before retrying if no workspace was created.`;
+}
+
+export function createTaskWorkspaceParentDirectory(wsPath: string): {ok: true} | {ok: false; error: string} {
+    try {
+        fs.mkdirSync(path.dirname(wsPath), {recursive: true});
+        return {ok: true};
+    } catch (error) {
+        return {ok: false, error: `Failed to create workspace parent directory: ${error}`};
+    }
+}
+
+function isUnderTaskWorkspacesDirectory(cwd: string): boolean {
+    const normalizedCwd = stripPrivatePrefix(path.resolve(cwd));
+    const normalizedHome = stripPrivatePrefix(os.homedir());
+    const base = path.join(normalizedHome, ".workspaces");
+    const rel = path.relative(base, normalizedCwd);
+    return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel);
 }
 
 /**

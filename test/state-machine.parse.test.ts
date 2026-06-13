@@ -134,6 +134,21 @@ test("parseAssistantOutput errors when a review finding is missing title", () =>
     assert.equal(error, "Finding 1 is missing a non-empty string 'title'.");
 });
 
+test("parseAssistantOutput errors instead of silently truncating at column-zero document markers", () => {
+    const error = expectError(parseAssistantOutput(`
+<review-findings>
+- title: Preserve marker
+  description: |
+    before
+---
+    after
+</review-findings>
+<transition>implement-review</transition>
+`, "review"));
+
+    assert.match(error, /Failed to parse Finding YAML block/);
+});
+
 test("parseAssistantOutput supports inline review-findings tags", () => {
     const parsed = expectParsed(parseAssistantOutput(
         "<review-findings>- title: Inline finding\n  description: Parsed from inline tag</review-findings><transition>implement-review</transition>",

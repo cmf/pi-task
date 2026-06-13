@@ -37,7 +37,7 @@ Default to TDD.
 A subtask is exempt from TDD only if **either**:
 
 - The parent plan entry for this subtask (in the root issue’s `<subtasks>` YAML) has `tdd: false`, **or**
-- The current subtask issue explicitly states TDD is not required.
+- The current subtask issue explicitly states TDD is not required, including a machine marker such as `<!-- tdd: false -->`.
 
 If you cannot confidently determine whether this subtask is exempt, **ask the user** before proceeding without tests.
 

@@ -260,6 +260,7 @@ test("review-plan: approval creates subtasks and moves to implement", () => {
             parentTaskId: ROOT,
             title: "Implement parser",
             description: "Add parser behavior",
+            tdd: true,
             idempotencyKey: `${ROOT}::Implement parser`,
         },
         {
@@ -267,6 +268,7 @@ test("review-plan: approval creates subtasks and moves to implement", () => {
             parentTaskId: ROOT,
             title: "Add tests",
             description: "Cover edge cases",
+            tdd: false,
             idempotencyKey: `${ROOT}::Add tests`,
         },
     ]);
@@ -291,6 +293,7 @@ test("review-plan: force LGTM creates subtasks and appends note", () => {
             parentTaskId: ROOT,
             title: "Implement parser",
             description: "Add parser behavior",
+            tdd: true,
             idempotencyKey: `${ROOT}::Implement parser`,
         },
         {
@@ -298,6 +301,7 @@ test("review-plan: force LGTM creates subtasks and appends note", () => {
             parentTaskId: ROOT,
             title: "Add tests",
             description: "Cover edge cases",
+            tdd: false,
             idempotencyKey: `${ROOT}::Add tests`,
         },
         {
@@ -410,17 +414,26 @@ test("review: approve path transitions to subtask-commit", () => {
     assert.deepEqual(decision.activeTaskTarget, {type: "current"});
 });
 
-test("review: rejects no transition and no findings", () => {
+test("review: ignores clarifying-question COMPLETE without a transition", () => {
+    const snapshot = makeSnapshot("review", {activeTaskId: SUBTASK, activeTaskParentId: ROOT});
     const decision = transition(
-        makeSnapshot("review", {activeTaskId: SUBTASK, activeTaskParentId: ROOT}),
-        complete("review", "Still reviewing this change"),
+        snapshot,
+        complete("review", "One clarifying question: should this also cover nil input?"),
     );
 
-    expectKind(decision, "rejected");
-    assert.equal(
-        decision.reason,
-        "Expected <transition>subtask-commit</transition> or findings + <transition>implement-review</transition>",
+    expectKind(decision, "ignored");
+    assert.equal(decision.state, "review");
+    assert.deepEqual(decision.activeTaskTarget, {type: "current"});
+    assert.deepEqual(decision.effects, []);
+
+    const laterDecision = transition(
+        snapshot,
+        complete("review", "Looks good now.\n<transition>subtask-commit</transition>"),
     );
+
+    expectKind(laterDecision, "applied");
+    assert.equal(laterDecision.state, "subtask-commit");
+    assert.deepEqual(laterDecision.activeTaskTarget, {type: "current"});
 });
 
 test("review: findings + implement-review transition creates child finding issues", () => {
@@ -449,6 +462,7 @@ test("review: findings + implement-review transition creates child finding issue
             parentTaskId: SUBTASK,
             title: "Fix edge case",
             description: "Handle nil input",
+            tdd: true,
             idempotencyKey: `${SUBTASK}::Fix edge case`,
         },
         {
@@ -456,6 +470,7 @@ test("review: findings + implement-review transition creates child finding issue
             parentTaskId: SUBTASK,
             title: "Add test",
             description: "Ensure regression coverage",
+            tdd: true,
             idempotencyKey: `${SUBTASK}::Add test`,
         },
     ]);
@@ -659,6 +674,7 @@ test("manual-test: implement transition creates root subtasks and moves to imple
             parentTaskId: ROOT,
             title: "Fix broken save flow",
             description: "Restore successful save after manual repro",
+            tdd: true,
             idempotencyKey: `${ROOT}::Fix broken save flow`,
         },
         {
@@ -666,6 +682,7 @@ test("manual-test: implement transition creates root subtasks and moves to imple
             parentTaskId: ROOT,
             title: "Update verification steps",
             description: "",
+            tdd: false,
             idempotencyKey: `${ROOT}::Update verification steps`,
         },
     ]);
@@ -713,7 +730,7 @@ test("commit: appends Fixes line from root description to multiline final commit
     ]);
 });
 
-test("commit: does not append Fixes line for single-line final commit message", () => {
+test("commit: appends Fixes line from root description to single-line final commit", () => {
     const decision = transition(
         makeSnapshot("commit"),
         complete(
@@ -726,7 +743,7 @@ test("commit: does not append Fixes line for single-line final commit message", 
     expectKind(decision, "applied");
     assert.deepEqual(decision.effects, [
         {type: "CLOSE_ISSUE", taskId: ROOT},
-        {type: "RUN_JJ_COMMIT", message: "feat: finalize workflow"},
+        {type: "RUN_JJ_COMMIT", message: "feat: finalize workflow\n\nFixes: owner/repo#123"},
     ]);
 });
 

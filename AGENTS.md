@@ -2,8 +2,8 @@
 
 ## Task extension (`index.ts`)
 
-The **task** extension provides a deterministic, ticket-driven workflow on top of
-`tk` (tickets) and `jj` (workspaces), with an explicit local state machine.
+The **task** extension provides a deterministic, GitHub-Issues-driven workflow on top of
+GitHub sub-issues and `jj` workspaces, with an explicit local state machine.
 
 - Command: `/task`
 - Main-workspace cleanup: `/task delete` lets you select and remove a per-task workspace (`jj workspace forget` + delete workspace directory).
@@ -40,9 +40,9 @@ The extension treats your repo in two modes:
 
 - Runs task selection and workspace management.
 - Offers to merge completed per-task workspaces back into main.
-- Chooses a ticket from `tk ready`, creates a dedicated `jj workspace` under
-  `~/.workspaces/<task-id>/<repo>`, marks the ticket `in_progress` (`tk start`),
-  and initializes `.tasks/workflow.json` in that workspace.
+- Chooses an open root GitHub issue, marks it with `status:in-progress`, creates a
+  dedicated `jj workspace` under `~/.workspaces/<task-id>/<repo>`, and initializes
+  `.tasks/workflow.json` in that workspace.
 - Instructs you to run `pi` in that workspace (or opens a tmux window).
 
 **Per-task workspace (`~/.workspaces/<task-id>/<repo>`)**
@@ -106,7 +106,7 @@ The extension treats your repo in two modes:
 
 The extension manages per-task `jj workspace` creation under
 `~/.workspaces/<task-id>/<repo>` and merges completed workspaces back into the
-main workspace as a **single squashed commit** (message defaults to the root ticket title).
+main workspace as a **single squashed commit** (message defaults to the task commit description).
 
 ## Project-local skill
 
