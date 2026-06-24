@@ -3,11 +3,28 @@ import assert from "node:assert/strict";
 
 import {
     buildTaskApplyPrompt,
+    buildTaskIssueHandlingHeader,
     parseTaskApplyArgs,
     runTaskApplyIterations,
     summarizeTaskApplyResults,
     validateTaskApplyAssistantMessage,
 } from "../index.js";
+
+function escapedLiteralPattern(text: string): RegExp {
+    return new RegExp(text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+}
+
+function staleIdentifierPattern(...parts: string[]): RegExp {
+    return escapedLiteralPattern(parts.join("_"));
+}
+
+function standaloneStaleToolPattern(): RegExp {
+    return new RegExp(`\\b${partsToEscapedLiteral("task", "issue", "edit")}\\b`);
+}
+
+function partsToEscapedLiteral(...parts: string[]): string {
+    return parts.join("_").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
 test("parseTaskApplyArgs accepts numbered findings and removes duplicates", () => {
     assert.deepEqual(parseTaskApplyArgs("1 2 2 5"), {findings: ["1", "2", "5"]});
@@ -58,12 +75,41 @@ test("buildTaskApplyPrompt tells the agent to use current issue content as autho
     assert.match(prompt, /Do not emit any workflow transition/i);
     assert.match(prompt, /will be ignored/i);
     assert.match(prompt, /`target: "root"`/i);
-    assert.match(prompt, /Use `action: "upsert_section"`/i);
-    assert.match(prompt, /`section: "plan"` or `section: "manual_test_plan"`/i);
-    assert.match(prompt, /content: <plan section body only, including <subtasks>\.\.\.<\/subtasks>>/i);
-    assert.match(prompt, /content: <manual test plan section body only>/i);
+    assert.match(prompt, /task_issue_edit_section/);
+    assert.match(prompt, /task_issue_insert_section/);
+    assert.match(prompt, /task_issue_edit_description/);
+    assert.match(prompt, /if the root issue `## Plan` section exists/i);
+    assert.match(prompt, /if the root issue `## Plan` section is missing/i);
+    assert.match(prompt, /if the root issue `## Manual Test Plan` section exists/i);
+    assert.match(prompt, /if the root issue `## Manual Test Plan` section is missing/i);
+    assert.match(prompt, /small, unique `oldText` blocks/i);
+    assert.match(prompt, /unless most of a section changed/i);
+    assert.match(prompt, /If finding 2 invalidates issue description or design text/i);
     assert.match(prompt, /Do not include the `# Title` line/i);
     assert.match(prompt, /# Example/);
+    assert.doesNotMatch(prompt, staleIdentifierPattern("upsert", "section"));
+    assert.doesNotMatch(prompt, staleIdentifierPattern("set", "description"));
+    assert.doesNotMatch(prompt, standaloneStaleToolPattern());
+});
+
+test("buildTaskIssueHandlingHeader names targeted issue edit tools only", () => {
+    const header = buildTaskIssueHandlingHeader({
+        workflowVersion: 19,
+        workflowState: "implement",
+        activeIssueId: "5",
+        activePathIds: ["1", "5"],
+    });
+
+    assert.match(header, /Workflow Version: 19/);
+    assert.match(header, /Workflow State: implement/);
+    assert.match(header, /Active Issue ID: 5/);
+    assert.match(header, /Active Path: 1 -> 5/);
+    assert.match(header, /task_issue_insert_section/);
+    assert.match(header, /task_issue_edit_section/);
+    assert.match(header, /task_issue_edit_description/);
+    assert.doesNotMatch(header, staleIdentifierPattern("upsert", "section"));
+    assert.doesNotMatch(header, staleIdentifierPattern("set", "description"));
+    assert.doesNotMatch(header, standaloneStaleToolPattern());
 });
 
 test("buildTaskApplyPrompt includes optional user instruction", () => {

@@ -41,10 +41,12 @@ Start by understanding the current project context, then ask questions one at a 
 ## When the design is complete and unambiguous
 
 **Documentation (required):**
-- Write the validated design into the active issue **description** using the `task_issue_edit` tool:
+- Write the validated design into the active issue **description** using `task_issue_edit_description`:
   - `target: "active"`
-  - `action: "set_description"`
-  - `content: <final description markdown>`
+  - `edits: [{ oldText: <current placeholder/old design text>, newText: <final description markdown> }]`
+- If the current description is empty, initialize it with `oldText: ""`.
+- Prefer replacing the exact placeholder or stale design text rather than unrelated issue content.
+- Do not include level-2 markdown headers (`## ...`) in description content; use `###` or lower inside the description.
 - Keep it clear and concise.
 
 Do not ask the user to edit the issue manually.

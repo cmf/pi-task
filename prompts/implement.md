@@ -20,7 +20,12 @@ Your job is to implement **only this subtask**, in a minimal, production-ready w
 
 ## Issue editing rules (critical)
 
-- Use `task_issue_edit` for issue content updates.
+- Use the targeted issue-editing tools for issue content updates:
+  - `task_issue_insert_section` when a workflow section is missing.
+  - `task_issue_edit_section` when a workflow section exists.
+  - `task_issue_edit_description` when stale issue description/design text needs correction.
+- Prefer small, unique `oldText` blocks for edits.
+- Do not include level-2 markdown headers (`## ...`) in section or description content; use `###` or lower inside a section.
 - Do not ask the user to manually edit issue content.
 - Do not perform workflow/lifecycle actions yourself; the extension controls transitions.
 
@@ -104,15 +109,12 @@ to the root `## Manual Test Plan`.
 As you work:
 
 - Keep notes in the issue if you discover constraints, make trade-offs, or adjust the approach.
-- Add/maintain a `## Summary of Changes` section in the **active issue** using `task_issue_edit`:
-  - `target: "active"`
-  - `action: "upsert_section"`
-  - `section: "summary_of_changes"`
-  - `content: <summary markdown>`
-- If this subtask changes end-to-end behavior, update root `## Manual Test Plan` using:
-  - `target: "root"`
-  - `action: "upsert_section"`
-  - `section: "manual_test_plan"`
+- Add/maintain a `## Summary of Changes` section in the **active issue**:
+  - If the section is missing, use `task_issue_insert_section` with `target: "active"`, `section: "summary_of_changes"`, and `content: <summary markdown>`.
+  - If the section exists, use `task_issue_edit_section` with `target: "active"`, `section: "summary_of_changes"`, and a small, unique replacement in `edits`.
+- If this subtask changes end-to-end behavior, update root `## Manual Test Plan`:
+  - If the section is missing, use `task_issue_insert_section` with `target: "root"`, `section: "manual_test_plan"`, and concrete test steps.
+  - If the section exists, use `task_issue_edit_section` with `target: "root"`, `section: "manual_test_plan"`, and a small, unique replacement in `edits`.
 
 ## Once done
 

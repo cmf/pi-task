@@ -64,29 +64,58 @@ const TASK_ISSUE_SECTION_HEADERS = {
 
 type TaskIssueSection = keyof typeof TASK_ISSUE_SECTION_HEADERS;
 
-type TaskIssueEditToolInput = {
-    target: "active" | "root";
-    action: "set_description" | "upsert_section";
-    section?: TaskIssueSection;
-    content: string;
-};
-
-const TaskIssueEditToolParams = Type.Object({
+const TaskIssueTargetParams = {
     target: StringEnum(["active", "root"] as const, {
         description: "Which workflow issue to edit.",
     }),
-    action: StringEnum(["set_description", "upsert_section"] as const, {
-        description: "Edit operation.",
+};
+
+const TaskIssueSectionParam = StringEnum(["plan", "manual_test_plan", "manual_verification", "summary_of_changes"] as const, {
+    description: "Workflow issue section to edit.",
+});
+
+const TaskIssueReplacementEditParams = Type.Object({
+    oldText: Type.String({
+        description: "Exact text for one targeted replacement. It must be unique in the section or description body and must not overlap with any other edits[].oldText in the same call.",
     }),
-    section: Type.Optional(
-        StringEnum(["plan", "manual_test_plan", "manual_verification", "summary_of_changes"] as const, {
-            description: "Required when action is upsert_section.",
-        }),
-    ),
-    content: Type.String({
-        description: "Markdown content to write. For upsert_section, provide section body only (without header).",
+    newText: Type.String({
+        description: "Replacement text for this targeted edit. Must not contain level-2 markdown headers (`## ...`).",
     }),
 });
+
+const TaskIssueInsertSectionToolParams = Type.Object({
+    ...TaskIssueTargetParams,
+    section: TaskIssueSectionParam,
+    content: Type.String({
+        description: "Section body to insert, without `##` headers.",
+    }),
+});
+
+const TaskIssueEditSectionToolParams = Type.Object({
+    ...TaskIssueTargetParams,
+    section: TaskIssueSectionParam,
+    edits: Type.Array(TaskIssueReplacementEditParams, {
+        description: "One or more targeted replacements. Each edit is matched against the original section body, not incrementally. Do not include overlapping or nested edits.",
+    }),
+});
+
+const TaskIssueEditDescriptionToolParams = Type.Object({
+    ...TaskIssueTargetParams,
+    edits: Type.Array(TaskIssueReplacementEditParams, {
+        description: "One or more targeted replacements. Each edit is matched against the original issue description before the first `##` section, not incrementally. Do not include overlapping or nested edits.",
+    }),
+});
+
+type TaskIssueToolTarget = "active" | "root";
+type TaskIssueInsertSectionToolInput = {target: TaskIssueToolTarget; section: TaskIssueSection; content: string};
+type TaskIssueEditSectionToolInput = {target: TaskIssueToolTarget; section: TaskIssueSection; edits: Edit[]};
+type TaskIssueEditDescriptionToolInput = {target: TaskIssueToolTarget; edits: Edit[]};
+type TaskIssueToolInput = TaskIssueInsertSectionToolInput | TaskIssueEditSectionToolInput | TaskIssueEditDescriptionToolInput;
+
+type TaskIssueBodyEditInput =
+    | {tool: "task_issue_insert_section"; section: TaskIssueSection; content: string}
+    | {tool: "task_issue_edit_section"; section: TaskIssueSection; edits: Edit[]}
+    | {tool: "task_issue_edit_description"; edits: Edit[]};
 
 export function normalizeSessionFilePath(sessionFile: string | undefined): string | null {
     if (!sessionFile) return null;
@@ -310,6 +339,240 @@ function escapeRegExp(text: string): string {
     return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+export function normalizeToLF(text: string): string {
+	return text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+}
+
+/**
+ * Normalize text for fuzzy matching. Applies progressive transformations:
+ * - Strip trailing whitespace from each line
+ * - Normalize smart quotes to ASCII equivalents
+ * - Normalize Unicode dashes/hyphens to ASCII hyphen
+ * - Normalize special Unicode spaces to regular space
+ */
+export function normalizeForFuzzyMatch(text: string): string {
+	return (
+		text
+			.normalize("NFKC")
+			// Strip trailing whitespace per line
+			.split("\n")
+			.map((line) => line.trimEnd())
+			.join("\n")
+			// Smart single quotes → '
+			.replace(/[\u2018\u2019\u201A\u201B]/g, "'")
+			// Smart double quotes → "
+			.replace(/[\u201C\u201D\u201E\u201F]/g, '"')
+			// Various dashes/hyphens → -
+			// U+2010 hyphen, U+2011 non-breaking hyphen, U+2012 figure dash,
+			// U+2013 en-dash, U+2014 em-dash, U+2015 horizontal bar, U+2212 minus
+			.replace(/[\u2010\u2011\u2012\u2013\u2014\u2015\u2212]/g, "-")
+			// Special spaces → regular space
+			// U+00A0 NBSP, U+2002-U+200A various spaces, U+202F narrow NBSP,
+			// U+205F medium math space, U+3000 ideographic space
+			.replace(/[\u00A0\u2002-\u200A\u202F\u205F\u3000]/g, " ")
+	);
+}
+
+export interface FuzzyMatchResult {
+	/** Whether a match was found */
+	found: boolean;
+	/** The index where the match starts (in the content that should be used for replacement) */
+	index: number;
+	/** Length of the matched text */
+	matchLength: number;
+	/** Whether fuzzy matching was used (false = exact match) */
+	usedFuzzyMatch: boolean;
+	/**
+	 * The content to use for replacement operations.
+	 * When exact match: original content. When fuzzy match: normalized content.
+	 */
+	contentForReplacement: string;
+}
+
+export interface Edit {
+	oldText: string;
+	newText: string;
+}
+
+interface MatchedEdit {
+	editIndex: number;
+	matchIndex: number;
+	matchLength: number;
+	newText: string;
+}
+
+export interface AppliedEditsResult {
+	baseContent: string;
+	newContent: string;
+}
+
+/**
+ * Find oldText in content, trying exact match first, then fuzzy match.
+ * When fuzzy matching is used, the returned contentForReplacement is the
+ * fuzzy-normalized version of the content (trailing whitespace stripped,
+ * Unicode quotes/dashes normalized to ASCII).
+ */
+export function fuzzyFindText(content: string, oldText: string): FuzzyMatchResult {
+	// Try exact match first
+	const exactIndex = content.indexOf(oldText);
+	if (exactIndex !== -1) {
+		return {
+			found: true,
+			index: exactIndex,
+			matchLength: oldText.length,
+			usedFuzzyMatch: false,
+			contentForReplacement: content,
+		};
+	}
+
+	// Try fuzzy match - work entirely in normalized space
+	const fuzzyContent = normalizeForFuzzyMatch(content);
+	const fuzzyOldText = normalizeForFuzzyMatch(oldText);
+	const fuzzyIndex = fuzzyContent.indexOf(fuzzyOldText);
+
+	if (fuzzyIndex === -1) {
+		return {
+			found: false,
+			index: -1,
+			matchLength: 0,
+			usedFuzzyMatch: false,
+			contentForReplacement: content,
+		};
+	}
+
+	// When fuzzy matching, we work in the normalized space for replacement.
+	// This means the output will have normalized whitespace/quotes/dashes,
+	// which is acceptable since we're fixing minor formatting differences anyway.
+	return {
+		found: true,
+		index: fuzzyIndex,
+		matchLength: fuzzyOldText.length,
+		usedFuzzyMatch: true,
+		contentForReplacement: fuzzyContent,
+	};
+}
+
+function countOccurrences(content: string, oldText: string): number {
+	const fuzzyContent = normalizeForFuzzyMatch(content);
+	const fuzzyOldText = normalizeForFuzzyMatch(oldText);
+	return fuzzyContent.split(fuzzyOldText).length - 1;
+}
+
+function getNotFoundError(path: string, editIndex: number, totalEdits: number): Error {
+	if (totalEdits === 1) {
+		return new Error(
+			`Could not find the exact text in ${path}. The old text must match exactly including all whitespace and newlines.`,
+		);
+	}
+	return new Error(
+		`Could not find edits[${editIndex}] in ${path}. The oldText must match exactly including all whitespace and newlines.`,
+	);
+}
+
+function getDuplicateError(path: string, editIndex: number, totalEdits: number, occurrences: number): Error {
+	if (totalEdits === 1) {
+		return new Error(
+			`Found ${occurrences} occurrences of the text in ${path}. The text must be unique. Please provide more context to make it unique.`,
+		);
+	}
+	return new Error(
+		`Found ${occurrences} occurrences of edits[${editIndex}] in ${path}. Each oldText must be unique. Please provide more context to make it unique.`,
+	);
+}
+
+function getEmptyOldTextError(path: string, editIndex: number, totalEdits: number): Error {
+	if (totalEdits === 1) {
+		return new Error(`oldText must not be empty in ${path}.`);
+	}
+	return new Error(`edits[${editIndex}].oldText must not be empty in ${path}.`);
+}
+
+function getNoChangeError(path: string, totalEdits: number): Error {
+	if (totalEdits === 1) {
+		return new Error(
+			`No changes made to ${path}. The replacement produced identical content. This might indicate an issue with special characters or the text not existing as expected.`,
+		);
+	}
+	return new Error(`No changes made to ${path}. The replacements produced identical content.`);
+}
+
+/**
+ * Apply one or more exact-text replacements to LF-normalized content.
+ *
+ * All edits are matched against the same original content. Replacements are
+ * then applied in reverse order so offsets remain stable. If any edit needs
+ * fuzzy matching, the operation runs in fuzzy-normalized content space to
+ * preserve current single-edit behavior.
+ */
+export function applyEditsToNormalizedContent(
+	normalizedContent: string,
+	edits: Edit[],
+	path: string,
+): AppliedEditsResult {
+	const normalizedEdits = edits.map((edit) => ({
+		oldText: normalizeToLF(edit.oldText),
+		newText: normalizeToLF(edit.newText),
+	}));
+
+	for (let i = 0; i < normalizedEdits.length; i++) {
+		if (normalizedEdits[i].oldText.length === 0) {
+			throw getEmptyOldTextError(path, i, normalizedEdits.length);
+		}
+	}
+
+	const initialMatches = normalizedEdits.map((edit) => fuzzyFindText(normalizedContent, edit.oldText));
+	const baseContent = initialMatches.some((match) => match.usedFuzzyMatch)
+		? normalizeForFuzzyMatch(normalizedContent)
+		: normalizedContent;
+
+	const matchedEdits: MatchedEdit[] = [];
+	for (let i = 0; i < normalizedEdits.length; i++) {
+		const edit = normalizedEdits[i];
+		const matchResult = fuzzyFindText(baseContent, edit.oldText);
+		if (!matchResult.found) {
+			throw getNotFoundError(path, i, normalizedEdits.length);
+		}
+
+		const occurrences = countOccurrences(baseContent, edit.oldText);
+		if (occurrences > 1) {
+			throw getDuplicateError(path, i, normalizedEdits.length, occurrences);
+		}
+
+		matchedEdits.push({
+			editIndex: i,
+			matchIndex: matchResult.index,
+			matchLength: matchResult.matchLength,
+			newText: edit.newText,
+		});
+	}
+
+	matchedEdits.sort((a, b) => a.matchIndex - b.matchIndex);
+	for (let i = 1; i < matchedEdits.length; i++) {
+		const previous = matchedEdits[i - 1];
+		const current = matchedEdits[i];
+		if (previous.matchIndex + previous.matchLength > current.matchIndex) {
+			throw new Error(
+				`edits[${previous.editIndex}] and edits[${current.editIndex}] overlap in ${path}. Merge them into one edit or target disjoint regions.`,
+			);
+		}
+	}
+
+	let newContent = baseContent;
+	for (let i = matchedEdits.length - 1; i >= 0; i--) {
+		const edit = matchedEdits[i];
+		newContent =
+			newContent.substring(0, edit.matchIndex) +
+			edit.newText +
+			newContent.substring(edit.matchIndex + edit.matchLength);
+	}
+
+	if (baseContent === newContent) {
+		throw getNoChangeError(path, normalizedEdits.length);
+	}
+
+	return { baseContent, newContent };
+}
+
 export function parseIssueNumberFromTaskId(taskId: string): number | null {
     const trimmed = taskId.trim();
     if (!trimmed) return null;
@@ -356,58 +619,136 @@ export function inProgressRootIssueIdFromWorkflow(params: {
     return String(issueNumber);
 }
 
-export function setIssueDescriptionMarkdown(existingBody: string, description: string): string {
-    const normalizedBody = normalizeMarkdownNewlines(existingBody ?? "");
-    const normalizedDescription = normalizeMarkdownNewlines(description).trim();
+const LEVEL_2_MARKDOWN_HEADER_PATTERN = /^##\s+/m;
+const LEVEL_2_MARKDOWN_HEADER_ERROR = "Section bodies must not contain level-2 markdown headers (`## ...`). Use `###` or lower inside a section.";
 
-    const firstSection = /^##\s+/m.exec(normalizedBody);
-    if (!firstSection) {
-        return normalizedDescription;
+type MarkdownSectionRange = {
+    headerStart: number;
+    headerEnd: number;
+    bodyStart: number;
+    bodyEnd: number;
+};
+
+function assertNoLevel2MarkdownHeaders(content: string): void {
+    if (LEVEL_2_MARKDOWN_HEADER_PATTERN.test(normalizeMarkdownNewlines(content))) {
+        throw new Error(LEVEL_2_MARKDOWN_HEADER_ERROR);
     }
-
-    const rest = normalizedBody.slice(firstSection.index).trimStart();
-    if (!rest) {
-        return normalizedDescription;
-    }
-
-    return `${normalizedDescription}\n\n${rest}`;
 }
 
-export function upsertMarkdownSection(existingBody: string, header: string, content: string): string {
-    const normalizedBody = normalizeMarkdownNewlines(existingBody ?? "").trim();
+function taskIssueSectionHeaderPattern(header: string): RegExp {
+    return new RegExp(`^${escapeRegExp(normalizeMarkdownNewlines(header).trim())}\\s*$`, "m");
+}
+
+function findNextWorkflowSectionStart(body: string, fromIndex: number): number {
+    const sectionHeaders = Object.values(TASK_ISSUE_SECTION_HEADERS);
+    let nextIndex = body.length;
+
+    for (const sectionHeader of sectionHeaders) {
+        const match = taskIssueSectionHeaderPattern(sectionHeader).exec(body.slice(fromIndex));
+        if (match) {
+            nextIndex = Math.min(nextIndex, fromIndex + match.index);
+        }
+    }
+
+    return nextIndex;
+}
+
+export function findMarkdownSectionRange(body: string, header: string): MarkdownSectionRange | null {
+    const normalizedBody = normalizeMarkdownNewlines(body ?? "");
+    const headerMatch = taskIssueSectionHeaderPattern(header).exec(normalizedBody);
+    if (!headerMatch) {
+        return null;
+    }
+
+    const headerStart = headerMatch.index;
+    const headerEnd = headerStart + headerMatch[0].length;
+    const bodyStart = normalizedBody[headerEnd] === "\n" ? headerEnd + 1 : headerEnd;
+    const bodyEnd = findNextWorkflowSectionStart(normalizedBody, bodyStart);
+
+    return {headerStart, headerEnd, bodyStart, bodyEnd};
+}
+
+export function insertMarkdownSection(existingBody: string, header: string, content: string): string {
+    assertNoLevel2MarkdownHeaders(content);
+
+    const normalizedBody = normalizeMarkdownNewlines(existingBody ?? "");
     const normalizedHeader = normalizeMarkdownNewlines(header).trim();
     const normalizedContent = normalizeMarkdownNewlines(content).trim();
     const sectionBlock = `${normalizedHeader}\n${normalizedContent}`;
 
-    if (!normalizedBody) {
+    if (findMarkdownSectionRange(normalizedBody, normalizedHeader)) {
+        throw new Error(`Section already exists: ${normalizedHeader}`);
+    }
+
+    if (!normalizedBody.trim()) {
         return sectionBlock;
     }
 
-    const headerMatch = new RegExp(`^${escapeRegExp(normalizedHeader)}\\s*$`, "m").exec(normalizedBody);
-    if (!headerMatch) {
-        return `${normalizedBody}\n\n${sectionBlock}`;
+    const separator = normalizedBody.endsWith("\n") ? "" : "\n\n";
+    return `${normalizedBody}${separator}${sectionBlock}`;
+}
+
+export function editMarkdownSection(existingBody: string, header: string, edits: Edit[]): string {
+    for (const edit of edits) {
+        assertNoLevel2MarkdownHeaders(edit.newText);
     }
 
-    const sectionStart = headerMatch.index;
-    const afterHeaderIndex = sectionStart + headerMatch[0].length;
-    const contentStart = normalizedBody[afterHeaderIndex] === "\n" ? afterHeaderIndex + 1 : afterHeaderIndex;
-    const afterSectionStart = normalizedBody.slice(contentStart);
-    const nextHeaderMatch = /^##\s+/m.exec(afterSectionStart);
-    const sectionEnd = nextHeaderMatch ? contentStart + nextHeaderMatch.index : normalizedBody.length;
+    const normalizedBody = normalizeMarkdownNewlines(existingBody ?? "");
+    const normalizedHeader = normalizeMarkdownNewlines(header).trim();
+    const range = findMarkdownSectionRange(normalizedBody, normalizedHeader);
+    if (!range) {
+        throw new Error(`Section not found: ${normalizedHeader}`);
+    }
 
-    const before = normalizedBody.slice(0, sectionStart).trimEnd();
-    const after = normalizedBody.slice(sectionEnd).trimStart();
+    const sectionBody = normalizedBody.slice(range.bodyStart, range.bodyEnd);
+    const result = applyEditsToNormalizedContent(sectionBody, edits, `section ${normalizedHeader}`);
+    const afterSection = normalizedBody.slice(range.bodyEnd);
+    const boundaryWhitespace = afterSection ? /\n+$/.exec(sectionBody)?.[0] ?? "\n" : "";
+    const nextContent = afterSection && result.newContent && !result.newContent.endsWith("\n")
+        ? `${result.newContent}${boundaryWhitespace}`
+        : result.newContent;
+    return `${normalizedBody.slice(0, range.bodyStart)}${nextContent}${afterSection}`;
+}
 
-    if (before && after) {
-        return `${before}\n\n${sectionBlock}\n\n${after}`;
+export function editIssueDescription(existingBody: string, edits: Edit[]): string {
+    for (const edit of edits) {
+        assertNoLevel2MarkdownHeaders(edit.newText);
     }
-    if (before) {
-        return `${before}\n\n${sectionBlock}`;
+
+    const normalizedBody = normalizeMarkdownNewlines(existingBody ?? "");
+    const firstSection = LEVEL_2_MARKDOWN_HEADER_PATTERN.exec(normalizedBody);
+    const descriptionEnd = firstSection ? firstSection.index : normalizedBody.length;
+    const description = normalizedBody.slice(0, descriptionEnd);
+    const rest = firstSection ? normalizedBody.slice(firstSection.index) : "";
+
+    let nextDescription: string;
+    if (edits.length === 1 && edits[0].oldText === "" && description.trim().length === 0) {
+        nextDescription = normalizeMarkdownNewlines(edits[0].newText);
+        if (nextDescription === description) {
+            throw new Error("No changes made to issue description. The replacement produced identical content.");
+        }
+    } else {
+        nextDescription = applyEditsToNormalizedContent(description, edits, "issue description").newContent;
     }
-    if (after) {
-        return `${sectionBlock}\n\n${after}`;
+
+    if (!rest) {
+        return nextDescription;
     }
-    return sectionBlock;
+    if (!nextDescription) {
+        return rest;
+    }
+    const separator = nextDescription.endsWith("\n") ? "" : "\n\n";
+    return `${nextDescription}${separator}${rest}`;
+}
+
+export function computeTaskIssueEditBody(existingBody: string, input: TaskIssueBodyEditInput): string {
+    if (input.tool === "task_issue_insert_section") {
+        return insertMarkdownSection(existingBody, taskIssueSectionHeader(input.section), input.content);
+    }
+    if (input.tool === "task_issue_edit_section") {
+        return editMarkdownSection(existingBody, taskIssueSectionHeader(input.section), input.edits);
+    }
+    return editIssueDescription(existingBody, input.edits);
 }
 
 type TaskApplyArgs = {findings: string[]; instruction?: string};
@@ -509,20 +850,34 @@ export function buildTaskApplyPrompt(params: {finding: string; rootIssueMarkdown
         "- Ignore older copies of the plan or manual test plan in the conversation.",
         `- Apply only finding ${finding}.`,
         ...instructionLines,
-        "- Preserve all unrelated plan and manual-test content.",
-        "- Use the `task_issue_edit` tool to update the root issue.",
-        "- Use `action: \"upsert_section\"` with `section: \"plan\"` or `section: \"manual_test_plan\"` for section updates.",
-        "- For root issue `## Plan` updates:",
+        "- Preserve all unrelated plan, manual-test, and description content.",
+        "- Use exact root issue edits; prefer small, unique `oldText` blocks.",
+        "- Do not replace a whole section unless most of a section changed.",
+        "- Use `task_issue_edit_section` when an existing root workflow section needs changes.",
+        "- Use `task_issue_insert_section` when a required root workflow section is missing.",
+        "- Use `task_issue_edit_description` if the finding invalidates root issue description or design text; update that text instead of repeatedly raising the same finding.",
+        "- If the root issue `## Plan` section exists:",
+        "  - tool: `task_issue_edit_section`",
         "  - `target: \"root\"`",
-        "  - `action: \"upsert_section\"`",
+        "  - `section: \"plan\"`",
+        "  - `edits: <small unique replacements inside the plan section body; keep <subtasks>...</subtasks> valid>`",
+        "- If the root issue `## Plan` section is missing:",
+        "  - tool: `task_issue_insert_section`",
+        "  - `target: \"root\"`",
         "  - `section: \"plan\"`",
         "  - `content: <plan section body only, including <subtasks>...</subtasks>>`",
-        "- For root issue `## Manual Test Plan` updates:",
+        "- If the root issue `## Manual Test Plan` section exists:",
+        "  - tool: `task_issue_edit_section`",
         "  - `target: \"root\"`",
-        "  - `action: \"upsert_section\"`",
+        "  - `section: \"manual_test_plan\"`",
+        "  - `edits: <small unique replacements inside the manual test plan section body>`",
+        "- If the root issue `## Manual Test Plan` section is missing:",
+        "  - tool: `task_issue_insert_section`",
+        "  - `target: \"root\"`",
         "  - `section: \"manual_test_plan\"`",
         "  - `content: <manual test plan section body only>`",
-        "- Do not include section headers in `content`.",
+        `- If finding ${finding} invalidates issue description or design text, use \`task_issue_edit_description\` with \`target: \"root\"\`.`,
+        "- Do not include `##` headers in section or description content; use `###` or lower inside a section.",
         "- Do not include the `# Title` line from the current root issue content in any edit.",
         "- Do not emit any workflow transition.",
         "- If you emit any `<transition>...</transition>` tag, it will be ignored; this command only edits the root issue.",
@@ -533,6 +888,32 @@ export function buildTaskApplyPrompt(params: {finding: string; rootIssueMarkdown
         "<root-issue-current>",
         rootIssueMarkdown,
         "</root-issue-current>",
+    ].join("\n");
+}
+
+export function buildTaskIssueHandlingHeader(params: {
+    workflowVersion: number;
+    workflowState: string;
+    activeIssueId: string;
+    activePathIds: string[];
+}): string {
+    return [
+        "## Issue Metadata",
+        `- Workflow Version: ${params.workflowVersion}`,
+        `- Workflow State: ${params.workflowState}`,
+        `- Active Issue ID: ${params.activeIssueId}`,
+        `- Active Path: ${params.activePathIds.join(" -> ")}`,
+        "",
+        "## Issue Handling Rules (critical)",
+        "- For issue content updates, use the targeted tools: `task_issue_insert_section`, `task_issue_edit_section`, and `task_issue_edit_description`.",
+        "- If a workflow section is missing, use `task_issue_insert_section`; if it exists, use `task_issue_edit_section` with small, unique `oldText` blocks.",
+        "- If stale requirements or design text in the issue description need correction, use `task_issue_edit_description`.",
+        "- Do not include `##` headers in section or description content; use `###` or lower inside a section.",
+        "- Do NOT ask the user to manually edit issue contents.",
+        "- Do NOT manually perform issue lifecycle actions (close/reopen/in-progress markers); the extension controls workflow transitions.",
+        "",
+        "## Issue Contents",
+        "The following is the current issue context chain (root -> ... -> active):",
     ].join("\n");
 }
 
@@ -2736,24 +3117,12 @@ function taskIssueEditError(reason: string, extraDetails?: Record<string, unknow
     };
 }
 
-async function executeTaskIssueEditTool(
+async function executeTaskIssueBodyEditTool(
     pi: ExtensionAPI,
     ctx: ExtensionContext,
-    input: TaskIssueEditToolInput,
+    tool: TaskIssueBodyEditInput["tool"],
+    input: TaskIssueToolInput,
 ) {
-    const content = input.content.trim();
-    if (!content) {
-        return taskIssueEditError("content must be non-empty.");
-    }
-
-    if (input.action === "set_description" && input.section) {
-        return taskIssueEditError("section is not valid for action=set_description.");
-    }
-
-    if (input.action === "upsert_section" && !input.section) {
-        return taskIssueEditError("section is required for action=upsert_section.");
-    }
-
     const jjRootResult = await pi.exec("jj", ["root"], {cwd: ctx.cwd});
     if (jjRootResult.code !== 0) {
         return taskIssueEditError("Not in a jj workspace (jj root failed)", {
@@ -2763,7 +3132,7 @@ async function executeTaskIssueEditTool(
 
     const root = jjRootResult.stdout.trim();
     if (!root || !isTaskWorkspace(root)) {
-        return taskIssueEditError("task_issue_edit can only be used inside a task workspace (~/.workspaces/<task-id>/<repo>).", {
+        return taskIssueEditError(`${tool} can only be used inside a task workspace (~/.workspaces/<task-id>/<repo>).`, {
             root,
         });
     }
@@ -2800,9 +3169,12 @@ async function executeTaskIssueEditTool(
             });
         }
 
-        const nextBody = input.action === "set_description"
-            ? setIssueDescriptionMarkdown(issue.body, content)
-            : upsertMarkdownSection(issue.body, taskIssueSectionHeader(input.section!), content);
+        const bodyEditInput = tool === "task_issue_insert_section"
+            ? {tool, section: (input as TaskIssueInsertSectionToolInput).section, content: (input as TaskIssueInsertSectionToolInput).content}
+            : tool === "task_issue_edit_section"
+                ? {tool, section: (input as TaskIssueEditSectionToolInput).section, edits: (input as TaskIssueEditSectionToolInput).edits}
+                : {tool, edits: (input as TaskIssueEditDescriptionToolInput).edits};
+        const nextBody = computeTaskIssueEditBody(issue.body, bodyEditInput);
 
         if (nextBody === issue.body) {
             return {
@@ -2813,8 +3185,8 @@ async function executeTaskIssueEditTool(
                     issueNumber: issue.number,
                     issueId: issue.id,
                     issueUrl: `https://github.com/${config.owner}/${config.repo}/issues/${issue.number}`,
-                    action: input.action,
-                    sectionHeader: input.section ? taskIssueSectionHeader(input.section) : undefined,
+                    tool,
+                    sectionHeader: "section" in input ? taskIssueSectionHeader(input.section) : undefined,
                     changed: false,
                     updatedAt: new Date().toISOString(),
                 },
@@ -2822,9 +3194,9 @@ async function executeTaskIssueEditTool(
         }
 
         const updated = await updateIssueBody(config, issue.id, nextBody);
-        const sectionHeader = input.section ? taskIssueSectionHeader(input.section) : undefined;
+        const sectionHeader = "section" in input ? taskIssueSectionHeader(input.section) : undefined;
         const targetLabel = input.target === "root" ? "root" : "active";
-        const operationLabel = input.action === "set_description"
+        const operationLabel = tool === "task_issue_edit_description"
             ? "description"
             : `section ${sectionHeader}`;
 
@@ -2836,14 +3208,14 @@ async function executeTaskIssueEditTool(
                 issueNumber: updated.number,
                 issueId: updated.id,
                 issueUrl: `https://github.com/${config.owner}/${config.repo}/issues/${updated.number}`,
-                action: input.action,
+                tool,
                 sectionHeader,
                 changed: true,
                 updatedAt: new Date().toISOString(),
             },
         };
     } catch (error) {
-        return taskIssueEditError(`task_issue_edit failed: ${error}`);
+        return taskIssueEditError(`${tool} failed: ${error}`);
     }
 }
 
@@ -2857,17 +3229,47 @@ export default function (pi: ExtensionAPI) {
     });
 
     pi.registerTool({
-        name: "task_issue_edit",
-        label: "Task Issue Edit",
+        name: "task_issue_insert_section",
+        label: "Task Issue Insert Section",
         description: [
-            "Edit workflow issue markdown for the active or root issue.",
-            "Supports set_description and upsert_section actions only.",
-            "Use section bodies only; do not include markdown headers in content.",
+            "Insert a missing workflow issue section for the active or root issue.",
+            "Fails if the section already exists.",
+            "Use section bodies only, without `##` headers.",
         ].join(" "),
-        parameters: TaskIssueEditToolParams,
+        parameters: TaskIssueInsertSectionToolParams,
         async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-            const input = params as TaskIssueEditToolInput;
-            return executeTaskIssueEditTool(pi, ctx, input);
+            const input = params as TaskIssueInsertSectionToolInput;
+            return executeTaskIssueBodyEditTool(pi, ctx, "task_issue_insert_section", input);
+        },
+    });
+
+    pi.registerTool({
+        name: "task_issue_edit_section",
+        label: "Task Issue Edit Section",
+        description: [
+            "Edit a workflow issue section using exact text replacement.",
+            "Every edits[].oldText must match a unique, non-overlapping region of the section body.",
+            "Use section bodies only, without `##` headers.",
+        ].join(" "),
+        parameters: TaskIssueEditSectionToolParams,
+        async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+            const input = params as TaskIssueEditSectionToolInput;
+            return executeTaskIssueBodyEditTool(pi, ctx, "task_issue_edit_section", input);
+        },
+    });
+
+    pi.registerTool({
+        name: "task_issue_edit_description",
+        label: "Task Issue Edit Description",
+        description: [
+            "Edit a workflow issue description using exact text replacement.",
+            "Every edits[].oldText must match a unique, non-overlapping region of the description before the first `##` section.",
+            "Do not include `##` headers in replacement text.",
+        ].join(" "),
+        parameters: TaskIssueEditDescriptionToolParams,
+        async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+            const input = params as TaskIssueEditDescriptionToolInput;
+            return executeTaskIssueBodyEditTool(pi, ctx, "task_issue_edit_description", input);
         },
     });
 
@@ -3470,23 +3872,12 @@ async function runTaskWorkspace(
             return;
         }
 
-        const headerLines = [
-            "## Issue Metadata",
-            `- Workflow Version: ${workflow.version}`,
-            `- Workflow State: ${workflow.state}`,
-            `- Active Issue ID: ${workflow.active_task_id}`,
-            `- Active Path: ${workflow.active_path_ids.join(" -> ")}`,
-            "",
-            "## Issue Handling Rules (critical)",
-            "- For issue content updates, use the `task_issue_edit` tool.",
-            "- Do NOT ask the user to manually edit issue contents.",
-            "- Do NOT manually perform issue lifecycle actions (close/reopen/in-progress markers); the extension controls workflow transitions.",
-            "",
-            "## Issue Contents",
-            "The following is the current issue context chain (root -> ... -> active):",
-        ];
-
-        const header = headerLines.join("\n");
+        const header = buildTaskIssueHandlingHeader({
+            workflowVersion: workflow.version,
+            workflowState: workflow.state,
+            activeIssueId: workflow.active_task_id,
+            activePathIds: workflow.active_path_ids,
+        });
         const manualTestFollowupContext = await buildManualTestFollowupContextMarkdown(pi, root, workflow);
         const issueContextWithWorkflowMetadata = manualTestFollowupContext
             ? `${issueContext}\n\n---\n\n${manualTestFollowupContext.trimEnd()}`

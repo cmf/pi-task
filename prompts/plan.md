@@ -152,19 +152,29 @@ Also prepare content for a `## Manual Test Plan` section after the subtasks.
 
 ## Writing back to the issue (required)
 
-Use `task_issue_edit` to persist both sections:
+Persist both root issue sections using the targeted issue-editing tools:
 
 1. Root issue `## Plan`
-   - `target: "root"`
-   - `action: "upsert_section"`
-   - `section: "plan"`
-   - `content: <plan section body only, including <subtasks>...</subtasks>>`
+   - If the section is missing, use `task_issue_insert_section` with:
+     - `target: "root"`
+     - `section: "plan"`
+     - `content: <plan section body only, including <subtasks>...</subtasks>>`
+   - If the section exists, use `task_issue_edit_section` with:
+     - `target: "root"`
+     - `section: "plan"`
+     - `edits: [{ oldText: <small unique existing plan text>, newText: <replacement plan text> }]`
 
 2. Root issue `## Manual Test Plan`
-   - `target: "root"`
-   - `action: "upsert_section"`
-   - `section: "manual_test_plan"`
-   - `content: <manual test plan section body only>`
+   - If the section is missing, use `task_issue_insert_section` with:
+     - `target: "root"`
+     - `section: "manual_test_plan"`
+     - `content: <manual test plan section body only>`
+   - If the section exists, use `task_issue_edit_section` with:
+     - `target: "root"`
+     - `section: "manual_test_plan"`
+     - `edits: [{ oldText: <small unique existing manual test text>, newText: <replacement manual test text> }]`
+
+Prefer small, unique `oldText` blocks. Do not replace a whole section unless most of it changed. Do not include level-2 markdown headers (`## ...`) in section content; use `###` or lower inside a section.
 
 Do not ask the user to edit the issue manually.
 

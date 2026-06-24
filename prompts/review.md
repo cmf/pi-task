@@ -74,11 +74,15 @@ If there are no important, concrete, actionable issues: output `<transition>subt
 
 ## Issue editing rules (critical)
 
-- Use `task_issue_edit` for issue content updates.
-- If needed, update active issue `## Summary of Changes` with:
-  - `target: "active"`, `action: "upsert_section"`, `section: "summary_of_changes"`
-- If a finding changes end-to-end behavior or adds scenarios, update root `## Manual Test Plan` with:
-  - `target: "root"`, `action: "upsert_section"`, `section: "manual_test_plan"`
+- Use the targeted issue-editing tools for issue content updates:
+  - `task_issue_insert_section` when a workflow section is missing.
+  - `task_issue_edit_section` when a workflow section exists.
+  - `task_issue_edit_description` when stale issue description/design text needs correction.
+- Prefer small, unique `oldText` blocks for edits.
+- Do not include level-2 markdown headers (`## ...`) in section or description content; use `###` or lower inside a section.
+- If needed, update active issue `## Summary of Changes` with `task_issue_insert_section` or `task_issue_edit_section` using `target: "active"` and `section: "summary_of_changes"`.
+- If a finding changes end-to-end behavior or adds scenarios, update root `## Manual Test Plan` with `task_issue_insert_section` or `task_issue_edit_section` using `target: "root"` and `section: "manual_test_plan"`.
+- If a finding invalidates stale issue description/design text, update that description with `task_issue_edit_description` instead of repeatedly re-raising the same finding.
 - If the user explicitly wants to proceed despite findings, they can run `/task lgtm`.
 
 ## Output requirements

@@ -61,21 +61,24 @@ to the root `## Manual Test Plan`.
 
 ## Issue editing rules (critical)
 
-- Use `task_issue_edit` for issue content updates.
+- Use the targeted issue-editing tools for issue content updates:
+  - `task_issue_insert_section` when a workflow section is missing.
+  - `task_issue_edit_section` when a workflow section exists.
+  - `task_issue_edit_description` when stale issue description/design text needs correction.
+- Prefer small, unique `oldText` blocks for edits.
+- Do not include level-2 markdown headers (`## ...`) in section or description content; use `###` or lower inside a section.
 - Do not ask the user to manually edit issue content.
 - Workflow/lifecycle transitions are extension-controlled.
 
 ## Issue hygiene
 
-- Ensure the active issue includes/updates a `## Summary of Changes` section using:
-  - `target: "active"`
-  - `action: "upsert_section"`
-  - `section: "summary_of_changes"`
+- Ensure the active issue includes/updates a `## Summary of Changes` section:
+  - If the section is missing, use `task_issue_insert_section` with `target: "active"`, `section: "summary_of_changes"`, and the summary body.
+  - If the section exists, use `task_issue_edit_section` with `target: "active"`, `section: "summary_of_changes"`, and a small, unique replacement in `edits`.
 - Record any deviations from the parent plan or unexpected constraints.
-- If this finding changes end-to-end behavior, update root `## Manual Test Plan` using:
-  - `target: "root"`
-  - `action: "upsert_section"`
-  - `section: "manual_test_plan"`
+- If this finding changes end-to-end behavior, update root `## Manual Test Plan`:
+  - If the section is missing, use `task_issue_insert_section` with `target: "root"`, `section: "manual_test_plan"`, and concrete test steps.
+  - If the section exists, use `task_issue_edit_section` with `target: "root"`, `section: "manual_test_plan"`, and a small, unique replacement in `edits`.
 
 ## Once done
 

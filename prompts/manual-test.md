@@ -28,13 +28,14 @@ tests. Any change having a user-facing component should have a manual testing st
    - `## Manual Test Plan` (preferred)
    - `## Manual Verification`
 
-2. If the checklist is missing or incomplete, update the root issue to add/improve it using `task_issue_edit`:
-   - For `## Manual Test Plan`:
-     - `target: "root"`, `action: "upsert_section"`, `section: "manual_test_plan"`
-   - For `## Manual Verification`:
-     - `target: "root"`, `action: "upsert_section"`, `section: "manual_verification"`
+2. If the checklist is missing or incomplete, update the root issue to add/improve it with targeted issue-editing tools:
+   - For `## Manual Test Plan`, use `section: "manual_test_plan"`.
+   - For `## Manual Verification`, use `section: "manual_verification"`.
+   - If the section is missing, use `task_issue_insert_section` with `target: "root"`, the appropriate `section`, and checklist `content`.
+   - If the section exists, use `task_issue_edit_section` with `target: "root"`, the appropriate `section`, and small, unique replacements in `edits`.
    - Steps must be concrete, ordered, and include expected results.
    - Include commands, URLs, UI navigation paths, and edge cases where relevant.
+   - Do not include level-2 markdown headers (`## ...`) in section content; use `###` or lower inside a section.
 
 3. Ask the user to run the checklist.
    - User-facing integration and manual-style checks must be performed by the user. This includes browser/UI flows, Playwright-driven checks, Swing/desktop automation, and other end-to-end app interaction; do not run them yourself.
@@ -60,7 +61,7 @@ If the prompt includes `## Previous Manual-Test Follow-ups`, treat those entries
 
 If current manual testing finds new follow-up implementation work:
 
-1. Update the root issue's `## Manual Verification` section with a concise failure summary and repro notes.
+1. Update the root issue's `## Manual Verification` section with a concise failure summary and repro notes using `task_issue_insert_section` if the section is missing or `task_issue_edit_section` if it exists.
 2. Output a `<manual-test-subtasks>...</manual-test-subtasks>` block containing a YAML list of subtask objects using the same schema as plan subtasks:
    - `title`: single-line string
    - `description`: multi-line markdown string

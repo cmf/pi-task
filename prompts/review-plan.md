@@ -22,17 +22,13 @@ code diff) for production readiness.
 - First, present the findings as a short actionable list and wait for the user's decision.
 - If you find plan problems, number them plainly as `1.`, `2.`, etc. and tell the user they can apply selected findings with `/task apply <numbers> [instruction]`.
 - Do **not** update the root issue yourself in response to normal approval like “apply 1 and 2”; direct the user to run `/task apply 1 2` instead. If a finding presents alternatives, tell the user they can add an instruction, for example `/task apply 1 do option b`. That command reloads the current root issue before each finding to avoid overwriting earlier edits.
-- When `/task apply` runs, it will give you a dedicated prompt for one finding at a time; only in that dedicated apply prompt should you update the **root issue sections** via `task_issue_edit`:
-  - For root issue `## Plan` updates:
-    - `target: "root"`
-    - `action: "upsert_section"`
-    - `section: "plan"`
-    - `content: <plan section body only, including <subtasks>...</subtasks>>`
-  - For root issue `## Manual Test Plan` updates:
-    - `target: "root"`
-    - `action: "upsert_section"`
-    - `section: "manual_test_plan"`
-    - `content: <manual test plan section body only>`
+- When `/task apply` runs, it will give you a dedicated prompt for one finding at a time; only in that dedicated apply prompt should you update the **root issue** via targeted issue-editing tools:
+  - If a root issue section is missing, use `task_issue_insert_section` with `target: "root"`, the appropriate `section`, and section body `content`.
+  - If a root issue section exists, use `task_issue_edit_section` with `target: "root"`, the appropriate `section`, and small, unique `oldText` replacements.
+  - For root issue `## Plan`, use `section: "plan"`; include `<subtasks>...</subtasks>` when editing plan content.
+  - For root issue `## Manual Test Plan`, use `section: "manual_test_plan"`.
+  - If a finding invalidates stale design or requirements text in the root issue description, use `task_issue_edit_description` to correct that text instead of re-raising the same finding.
+  - Do not include level-2 markdown headers (`## ...`) in section or description content; use `###` or lower inside a section.
 - Do not ask the user to manually edit issue contents.
 - Workflow transitions are extension-controlled.
 - If the user explicitly wants to proceed without applying any of the findings, treat those findings as waived for this review pass.
@@ -103,7 +99,7 @@ code diff) for production readiness.
   - tell the user to run `/task apply <numbers> [instruction]` for the selected findings, for example `/task apply 1 2` or `/task apply 1 do option b`
   - do **not** emit a workflow transition
 - If you are responding to a dedicated `/task apply` prompt:
-  - update the root issue plan/manual-test content via `task_issue_edit`
+  - update the root issue plan/manual-test content with `task_issue_insert_section` or `task_issue_edit_section`, and update stale description/design text with `task_issue_edit_description` when needed
   - do **not** emit a workflow transition
   - tell the user: when they are done applying findings, run `/task` for re-review; if they want to proceed to implementation without further re-review, run `/task lgtm`
 - If the user explicitly says all findings are not required / should be waived for this task, emit `<transition>implement</transition>`.

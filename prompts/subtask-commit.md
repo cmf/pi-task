@@ -15,7 +15,12 @@ to ensure the working copy is ready and provide a good commit message.
 
 ## Issue editing rules (critical)
 
-- Use `task_issue_edit` for issue content updates.
+- Use the targeted issue-editing tools for issue content updates:
+  - `task_issue_insert_section` when a workflow section is missing.
+  - `task_issue_edit_section` when a workflow section exists.
+  - `task_issue_edit_description` when stale issue description/design text needs correction.
+- Prefer small, unique `oldText` blocks for edits.
+- Do not include level-2 markdown headers (`## ...`) in section or description content; use `###` or lower inside a section.
 - Do not ask the user to manually edit issue content.
 - Do not perform lifecycle/workflow actions directly; the extension handles transitions.
 
@@ -26,8 +31,9 @@ to ensure the working copy is ready and provide a good commit message.
    - Run: `jj diff --git --color=never`
 
 2. Ensure issue hygiene before committing:
-   - The active issue includes/updates a `## Summary of Changes` section using:
-     - `target: "active"`, `action: "upsert_section"`, `section: "summary_of_changes"`
+   - The active issue includes/updates a `## Summary of Changes` section:
+     - If the section is missing, use `task_issue_insert_section` with `target: "active"`, `section: "summary_of_changes"`, and the summary body.
+     - If the section exists, use `task_issue_edit_section` with `target: "active"`, `section: "summary_of_changes"`, and a small, unique replacement in `edits`.
    - If you deviated from the plan, the issue explains what changed and why.
 
 ## Scope control (keep the commit tight)
