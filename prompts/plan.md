@@ -3,208 +3,68 @@ model: openai-codex/gpt-5.6-sol
 thinking: high
 ---
 
-Your task is to write a concise, executable implementation plan for the current issue,
-split into small, concrete, independently-executable subtasks.
+Create the smallest executable implementation plan for the root issue. Inspect
+relevant project state before planning. Split work only where changes are
+independently deliverable and reviewable; avoid investigation-only tasks, copied
+requirements, repeated boilerplate, speculative architecture, and tiny
+internal-step subtasks. Include dependencies, state or data flow, failure
+behavior, and migration or security constraints only where material. If an
+unresolved decision affects implementation, ask one question and stop.
 
-**YAGNI:**
+## Subtask contract
 
-- Prefer the minimum required change to make the issue work
-- Choose the simplest solution that satisfies the requirements
-- If something can be simplified further, do so
-
-## Concision policy
-
-Plans should be as small as possible while remaining executable.
-
-- Prefer fewer subtasks when a change is naturally implemented together.
-- Do not create subtasks for tiny internal steps unless they are independently reviewable.
-- Keep each subtask description focused on:
-  - the behavioral change,
-  - the test to add/update,
-  - the command to run,
-  - the minimal implementation notes needed.
-- Avoid long rationale, copied requirements, broad architecture discussion, and exhaustive edge-case inventories; reference the issue’s design instead of restating it unless the detail is needed to execute a subtask.
-- Do not repeat generic TDD boilerplate in every subtask when a short concrete test/run/implement sequence is enough.
-- Manual test plans should cover the critical user-visible path and meaningful edge cases, not every permutation.
-
-## Subtasks
-
-A **subtask** is **one independently-deliverable change** (something that could
-be implemented and reviewed on its own). A subtask can include multiple steps
-(e.g. test → implement → verify), but it must be specific and actionable.
-
-Avoid “investigation-only” subtasks. If you must investigate, it should be a
-small, time-boxed first step inside a subtask that still ends with a concrete
-code/config change.
-
-### TDD policy
-
-Subtasks default to requiring TDD.
-
-Exceptions are allowed:
-
-1. UI code, including Swing/UI code, where lower-level automated tests are not practical
-2. One-off scripts with no existing testing
-3. Documentation-only changes
-4. Changes where the only plausible automated test would inspect or grep repository files/content to prove that implementation text, imports, function calls, prompts, config snippets, docs, test files, test cases, assertions, fixtures, snapshots, test names, or other repository content were added or changed
-
-Swing/UI code may use lower-level automated tests where practical, but user-flow Swing automation belongs in the root `## Manual Test Plan` for the user to run during `manual-test`.
-
-If you believe a subtask should be exempt from TDD, **ask the user to confirm**.
-When the user confirms, set `tdd: false` for that subtask.
-
-If `tdd` is true (default), the description should include these steps (adapt
-commands to the repo):
-
-- Write the failing test
-- Run it to confirm it fails
-- Implement the minimal code to make the test pass
-- Run the tests to confirm they pass
-
-TDD tests must exercise observable behaviour through an appropriate boundary, such as a public API,
-CLI output, parser/model/service behaviour, generated artifact, or equivalent lower-level interface.
-Do **not** create, keep, count, or report automated tests/checks that inspect or grep repository files/content
-to prove that implementation text, imports, function calls, prompts, config snippets, docs, test files,
-test cases, assertions, fixtures, snapshots, test names, or other repository content were added or changed.
-Such checks cannot satisfy TDD, even as supplemental verification. Assertions against generated outputs/artifacts are acceptable when they test observable behaviour rather than repository implementation content. Using grep/search for investigation
-is fine, but it is not a test.
-
-If the only plausible automated test would be a repository-content assertion that a particular change
-exists, ask the user whether this subtask should be exempt from TDD (`tdd: false`) and whether additional
-manual verification is required. Stop and wait for approval; do not update the issue or emit a transition
-in the same response. Do not create a `tdd: true` subtask whose test is just repository-content inspection.
-
-User-facing browser/desktop/end-to-end automation is not an acceptable implementation-stage TDD test.
-This includes Playwright browser flows, Swing or desktop UI automation, and similar user-flow checks.
-Prefer lower-level automated tests instead: unit, component, model, service, or API tests.
-If the only meaningful test is user-facing automation, ask the user to approve `tdd: false`
-and put the concrete user-run checks in the root `## Manual Test Plan`.
-
-If `tdd: false` (user-approved), the description should include:
-
-- Note stating that the user explicitly approved manual verification for this subtask
-- Implement the minimal code to fulfil the subtask requirements
-- Add/update the relevant manual verification steps in the root `## Manual Test Plan`
-
-When `tdd: false`, the subtask should include testing steps in the `## Manual Test Plan` (below).
-
-### User-facing integration testing
-
-Do not put user-facing integration or manual-style test execution or verification inside implementation subtasks.
-This includes browser/UI flows with tools like Playwright, Swing or desktop UI automation,
-and other end-to-end checks that exercise the app the way a user would.
-
-Instead, place those checks in the root `## Manual Test Plan` so they are performed by
-the user during the manual-test stage. Subtask descriptions may say to add or update
-the manual test plan, but they should not instruct the implementation agent to run
-those checks before manual-test.
-
-If the task explicitly asks you to add or update user-facing integration test assets
-(for example Playwright specs, Cypress/Selenium tests, or Swing automation helpers), an
-implementation subtask may author those files. Do not run them before `manual-test` or
-rely on them as implementation verification; put concrete user-run execution steps and
-expected results in the root `## Manual Test Plan`.
-
-## Output format
-
-Prepare plan content for a `## Plan` section.
-
-Inside that section, include a delimited block containing **only** a YAML list of
-subtask objects using `<subtasks>...</subtasks>` delimiters.
-
-Inside the YAML list, each item must be:
+Each YAML item must contain:
 
 - `title`: single-line string
-- `description`: multi-line string containing markdown (use `|`)
-- `tdd`: optional boolean (defaults to `true`; set `false` only with user approval)
+- `description: |`: concise behavioral change, exact paths, focused test and
+  command with expected result, and only essential implementation notes
+- optional `tdd`: defaults to `true`; use `false` only after explicit user
+  approval
 
-YAML must be valid (proper indentation, no stray text inside the delimiters).
+For TDD subtasks, specify a small red-green loop using observable behavior
+through an API, CLI, parser/model/service boundary, generated artifact, or
+equivalent interface. Repository-content checks that grep or inspect files
+merely to prove text, imports, calls, prompts, config, docs, fixtures,
+snapshots, or tests changed cannot satisfy TDD. If no meaningful behavioral test
+exists, ask whether to use `tdd: false` and whether extra manual verification is
+needed; stop without editing or transitioning.
 
-### Example
+User-facing browser, GUI, desktop, or end-to-end automation belongs in the root
+manual test plan, not implementation verification. Prefer lower-level tests. If
+only a user-flow test is meaningful, request `tdd: false`. A `tdd: false`
+subtask must record user approval, require the minimum implementation, and add
+concrete manual verification. Requested integration-test assets may be authored
+during implementation but must not be run before `manual-test`.
+
+## Required issue content
+
+Prepare:
 
 ```md
-## Plan
 <subtasks>
-- title: "Reject empty/blank project name (HTTP 400)"
-  tdd: true
+- title: "..."
   description: |
-    - Write a failing test in `tests/test_project_create.py` asserting that creating a project with an empty name returns HTTP 400.
-    - Run: `pytest -q tests/test_project_create.py::test_create_project_empty_name`
-      - Expected: the test fails with an assertion error (e.g. got 201 but expected 400).
-    - Implement the minimal validation in `src/api/projects.py` (reject empty/whitespace-only names).
-    - Run: `pytest -q tests/test_project_create.py::test_create_project_empty_name`
-      - Expected: the test passes.
-
-- title: "Return error code `project_name_required` for blank project name"
-  tdd: true
-  description: |
-    - Write a failing test asserting the response body includes an error code/message (e.g. `{"error":"project_name_required"}`).
-    - Run: `pytest -q tests/test_project_create.py::test_create_project_empty_name_message`
-      - Expected: fails (message missing or different).
-    - Implement the minimal error payload change in `src/api/projects.py`.
-    - Run: `pytest -q tests/test_project_create.py::test_create_project_empty_name_message`
-      - Expected: passes.
-
-- title: "Add Swing preferences panel for proxy settings (user-approved no-TDD)"
-  tdd: false
-  description: |
-    - User has confirmed that TDD is exempt for this Swing UI change.
-    - Implement a new Swing configuration panel in `src/ui/ProxySettingsPanel.java`:
-      - Text fields for host/port, a checkbox for "Use proxy"
-      - Load initial values from existing config, if present
-      - Persist changes back to config on Apply/OK
-    - Wire the panel into the preferences dialog in `src/ui/PreferencesDialog.java`.
-    - Add the Swing UI checks for launching the app, opening Preferences → Network, and verifying persisted proxy settings to the root `## Manual Test Plan`; do not run those checks during implementation.
+    - Add a failing behavioral test in `exact/path`.
+    - Run: `exact command` — expected to fail for the missing behavior.
+    - Implement the minimum change in `exact/path`.
+    - Run: `exact command` — expected to pass.
 </subtasks>
 ```
 
-### Manual testing plan
+Also prepare a concise root `## Manual Test Plan` body with ordered user-visible
+steps, commands/URLs/navigation where relevant, and expected results. Cover
+critical paths and meaningful edge cases, not every permutation. If no
+meaningful user-facing check exists, state that briefly and name the automated
+verification instead.
 
-Also prepare content for a `## Manual Test Plan` section after the subtasks.
-- Steps must be explicit and include expected results.
-- Include commands/URLs/UI navigation where relevant.
-- User-facing integration/manual-style checks, including Playwright browser flows and Swing UI checks, belong here and are performed by the user during the manual-test stage.
+Persist both root sections with targeted tools:
 
-## Writing back to the issue (required)
+- missing section: `task_issue_insert_section`;
+- existing section: `task_issue_edit_section` with small, unique replacements.
 
-Persist both root issue sections using the targeted issue-editing tools:
+Use `section: "plan"` for the body containing `<subtasks>...</subtasks>` and
+`section: "manual_test_plan"` for manual steps. Do not include `##` headers in
+tool content, replace more text than needed, or ask the user to edit the issue.
 
-1. Root issue `## Plan`
-   - If the section is missing, use `task_issue_insert_section` with:
-     - `target: "root"`
-     - `section: "plan"`
-     - `content: <plan section body only, including <subtasks>...</subtasks>>`
-   - If the section exists, use `task_issue_edit_section` with:
-     - `target: "root"`
-     - `section: "plan"`
-     - `edits: [{ oldText: <small unique existing plan text>, newText: <replacement plan text> }]`
-
-2. Root issue `## Manual Test Plan`
-   - If the section is missing, use `task_issue_insert_section` with:
-     - `target: "root"`
-     - `section: "manual_test_plan"`
-     - `content: <manual test plan section body only>`
-   - If the section exists, use `task_issue_edit_section` with:
-     - `target: "root"`
-     - `section: "manual_test_plan"`
-     - `edits: [{ oldText: <small unique existing manual test text>, newText: <replacement manual test text> }]`
-
-Prefer small, unique `oldText` blocks. Do not replace a whole section unless most of it changed. Do not include level-2 markdown headers (`## ...`) in section content; use `###` or lower inside a section.
-
-Do not ask the user to edit the issue manually.
-
-## Once done
-
-**Critical:** After writing the sections to the issue, request workflow transition by outputting:
-
-`<transition>review-plan</transition>`
-
-The extension advances workflow state from your `<transition>...</transition>` output.
-
-## Remember
-
-- Use exact file paths in the repo (no “or wherever this lives”)
-- Use explicit commands (with expected outcomes) instead of “run tests”
-- Keep subtasks DRY and YAGNI
-- Keep the plan short; if a detail is not needed for implementation or review, omit it
-- Prefer concrete edits over vague language (avoid “add validation”, “refactor stuff”)
+After both sections are persisted, output
+`<transition>review-plan</transition>`.
