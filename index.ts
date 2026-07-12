@@ -310,7 +310,20 @@ export function resolveEditorDialogValue(
     };
 }
 
-export function detectTaskWorkspaceLaunchMode(env: Record<string, string | undefined>): "tmux" | "ghostty" | "manual" {
+export type TaskWorkspaceLaunchMode = "herdr" | "tmux" | "ghostty" | "manual";
+
+export type HerdrWorkspaceLaunchTarget = {
+    workspaceId: string;
+    rootPaneId: string;
+};
+
+type WorkspaceLaunchExecResult = {code: number; stdout: string; stderr: string};
+type WorkspaceLaunchExec = (command: string, args: string[]) => Promise<WorkspaceLaunchExecResult>;
+
+export function detectTaskWorkspaceLaunchMode(env: Record<string, string | undefined>): TaskWorkspaceLaunchMode {
+    if (env.HERDR_ENV === "1") {
+        return "herdr";
+    }
     if (env.TMUX) {
         return "tmux";
     }
@@ -318,6 +331,78 @@ export function detectTaskWorkspaceLaunchMode(env: Record<string, string | undef
         return "ghostty";
     }
     return "manual";
+}
+
+export function parseHerdrWorkspaceCreateOutput(stdout: string):
+    | {ok: true; target: HerdrWorkspaceLaunchTarget}
+    | {ok: false; error: string} {
+    let parsed: unknown;
+    try {
+        parsed = JSON.parse(stdout);
+    } catch (error) {
+        return {ok: false, error: `Herdr workspace create returned invalid JSON: ${error}`};
+    }
+
+    const result = isObject(parsed) && isObject(parsed.result) ? parsed.result : null;
+    const workspace = result && isObject(result.workspace) ? result.workspace : null;
+    const rootPane = result && isObject(result.root_pane) ? result.root_pane : null;
+    const workspaceId = typeof workspace?.workspace_id === "string" ? workspace.workspace_id.trim() : "";
+    const rootPaneId = typeof rootPane?.pane_id === "string" ? rootPane.pane_id.trim() : "";
+
+    if (!workspaceId) {
+        return {ok: false, error: "Herdr workspace create response is missing non-empty result.workspace.workspace_id."};
+    }
+    if (!rootPaneId) {
+        return {ok: false, error: "Herdr workspace create response is missing non-empty result.root_pane.pane_id."};
+    }
+
+    return {ok: true, target: {workspaceId, rootPaneId}};
+}
+
+function externalCommandError(result: WorkspaceLaunchExecResult): string {
+    const stderr = result.stderr.trim();
+    const stdout = result.stdout.trim();
+    if (stderr && stdout) {
+        return `stderr: ${stderr}; stdout: ${stdout}`;
+    }
+    return stderr || stdout || "unknown error";
+}
+
+export async function launchHerdrWorkspace(params: {
+    workspacePath: string;
+    slug: string;
+    exec: WorkspaceLaunchExec;
+}): Promise<{ok: true} | {ok: false; error: string}> {
+    const createResult = await params.exec("herdr", [
+        "workspace", "create",
+        "--cwd", params.workspacePath,
+        "--label", params.slug,
+        "--focus",
+    ]);
+    if (createResult.code !== 0) {
+        return {ok: false, error: `Failed to create Herdr workspace: ${externalCommandError(createResult)}`};
+    }
+
+    const parsed = parseHerdrWorkspaceCreateOutput(createResult.stdout);
+    if (!parsed.ok) {
+        return parsed;
+    }
+
+    const startResult = await params.exec("herdr", ["pane", "run", parsed.target.rootPaneId, "pi"]);
+    if (startResult.code === 0) {
+        return {ok: true};
+    }
+
+    const startError = externalCommandError(startResult);
+    const cleanupResult = await params.exec("herdr", ["workspace", "close", parsed.target.workspaceId]);
+    if (cleanupResult.code !== 0) {
+        return {
+            ok: false,
+            error: `Failed to start Pi in Herdr workspace: ${startError}. Also failed to close Herdr workspace ${parsed.target.workspaceId}: ${externalCommandError(cleanupResult)}`,
+        };
+    }
+
+    return {ok: false, error: `Failed to start Pi in Herdr workspace: ${startError}`};
 }
 
 function escapeAppleScriptString(value: string): string {
@@ -346,6 +431,51 @@ export function buildGhosttyWorkspaceTabAppleScript(workspacePath: string, comma
         '    send key "enter" to term',
         "end tell",
     ].join("\n");
+}
+
+export async function launchTaskWorkspace(params: {
+    workspacePath: string;
+    slug: string;
+    env: Record<string, string | undefined>;
+    exec: WorkspaceLaunchExec;
+    notify: (message: string, level: "info" | "warning") => void;
+}): Promise<void> {
+    const launchMode = detectTaskWorkspaceLaunchMode(params.env);
+    if (launchMode === "herdr") {
+        const herdrResult = await launchHerdrWorkspace({
+            workspacePath: params.workspacePath,
+            slug: params.slug,
+            exec: params.exec,
+        });
+        if (herdrResult.ok) {
+            params.notify(`Opened Herdr workspace: ${params.slug}`, "info");
+            return;
+        }
+
+        params.notify(herdrResult.error, "warning");
+        params.notify(`Next: cd ${params.workspacePath} && pi`, "info");
+        return;
+    }
+
+    if (launchMode === "tmux") {
+        await params.exec("tmux", ["new-window", "-n", params.slug, "-c", params.workspacePath]);
+        await params.exec("tmux", ["send-keys", "pi", "Enter"]);
+        params.notify(`Opened tmux window: ${params.slug}`, "info");
+        return;
+    }
+
+    if (launchMode === "ghostty") {
+        const ghosttyResult = await params.exec("osascript", ["-e", buildGhosttyWorkspaceTabAppleScript(params.workspacePath)]);
+        if (ghosttyResult.code === 0) {
+            params.notify(`Opened Ghostty tab: ${params.slug}`, "info");
+            return;
+        }
+
+        const ghosttyError = ghosttyResult.stderr.trim() || ghosttyResult.stdout.trim() || "unknown error";
+        params.notify(`Failed to open Ghostty tab automatically: ${ghosttyError}`, "warning");
+    }
+
+    params.notify(`Next: cd ${params.workspacePath} && pi`, "info");
 }
 
 function normalizeMarkdownNewlines(text: string): string {
@@ -5149,26 +5279,13 @@ async function selectAndStartTask(
     // Display success message
     ctx.ui.notify(`${workflowKind === "fix" ? "Fix" : "Task"} workspace created: ${wsPath}`, "info");
 
-    const launchMode = detectTaskWorkspaceLaunchMode(process.env);
-    if (launchMode === "tmux") {
-        await pi.exec("tmux", ["new-window", "-n", slug, "-c", wsPath]);
-        await pi.exec("tmux", ["send-keys", "pi", "Enter"]);
-        ctx.ui.notify(`Opened tmux window: ${slug}`, "info");
-        return;
-    }
-
-    if (launchMode === "ghostty") {
-        const ghosttyResult = await pi.exec("osascript", ["-e", buildGhosttyWorkspaceTabAppleScript(wsPath)]);
-        if (ghosttyResult.code === 0) {
-            ctx.ui.notify(`Opened Ghostty tab: ${slug}`, "info");
-            return;
-        }
-
-        const ghosttyError = ghosttyResult.stderr.trim() || ghosttyResult.stdout.trim() || "unknown error";
-        ctx.ui.notify(`Failed to open Ghostty tab automatically: ${ghosttyError}`, "warning");
-    }
-
-    ctx.ui.notify(`Next: cd ${wsPath} && pi`, "info");
+    await launchTaskWorkspace({
+        workspacePath: wsPath,
+        slug,
+        env: process.env,
+        exec: (command, args) => pi.exec(command, args),
+        notify: (message, level) => ctx.ui.notify(message, level),
+    });
 }
 
 export function formatWorkspaceCreationFailureMessage(stderr: string): string {

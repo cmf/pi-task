@@ -47,7 +47,7 @@ The extension treats your repo in two modes:
 - Chooses an open root GitHub issue, marks it with `status:in-progress`, creates a
   dedicated `jj workspace` under `~/.workspaces/<task-id>/<repo>`, and initializes
   `.tasks/workflow.json` in that workspace.
-- Instructs you to run `pi` in that workspace (or opens a tmux window).
+- Launches the workflow workspace using the first available environment in this order: a new Herdr workspace, a tmux window, a Ghostty tab, or manual `cd ... && pi` instructions.
 
 **Per-task workspace (`~/.workspaces/<task-id>/<repo>`)**
 
