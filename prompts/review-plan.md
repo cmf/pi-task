@@ -1,5 +1,5 @@
 ---
-model: openai-codex/gpt-5.5
+model: openai-codex/gpt-5.6-sol
 thinking: high
 fast: true
 ---
@@ -48,6 +48,16 @@ code diff) for production readiness.
 - Minimum required change to satisfy the issue
 - Simplest viable approach (no speculative abstractions)
 - No scope creep / extra features
+- No over-decomposition into many tiny subtasks
+- No verbose rationale where a concrete instruction would suffice
+
+**Concision:**
+
+- Plan is no longer than necessary for safe implementation.
+- Subtasks are not padded with repeated boilerplate, copied requirements, or speculative notes.
+- The plan avoids over-decomposition into many tiny subtasks.
+- Manual test plan covers the important user-visible checks without becoming an exhaustive script.
+- If the plan is oversized, require shortening rather than adding more detail.
 
 **Architecture / Design:**
 
@@ -113,6 +123,7 @@ For each finding:
 - Reference the exact subtask by **title** (and quote the relevant lines if helpful)
 - Explain **why** it matters
 - Specify exactly **what to change** in the plan
+- Treat excessive verbosity as actionable only when it makes the plan harder to execute or review; ask for specific cuts, not vague “make it shorter” feedback.
 
 If the user approves applying your findings in normal conversation, tell them to run `/task apply <numbers> [instruction]` rather than updating the root issue yourself. Until then, only report the findings.
 

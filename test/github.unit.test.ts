@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+    createIssue,
     findChildIssueByExactTitle,
     GitHubGraphQLError,
     listIssues,
@@ -105,6 +106,36 @@ test("listIssues retries invalid JSON transient GitHub responses", async () => {
         const issues = await listIssues(config, {states: ["OPEN"], pageSize: 10});
         assert.deepEqual(issues, []);
         assert.equal(calls, 2);
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+});
+
+test("createIssue does not retry an ambiguous transient mutation failure", async () => {
+    const originalFetch = globalThis.fetch;
+    const queries: string[] = [];
+    globalThis.fetch = (async (_input, init) => {
+        const query = String(JSON.parse(String(init?.body ?? "{}")).query ?? "");
+        queries.push(query);
+
+        if (/\bquery\b/i.test(query)) {
+            return new Response(JSON.stringify({
+                data: {repository: {id: "repository-id"}},
+            }), {status: 200, headers: {"content-type": "application/json"}});
+        }
+
+        return new Response(JSON.stringify({errors: [{message: "temporary outage"}]}), {
+            status: 503,
+            headers: {"content-type": "application/json"},
+        });
+    }) as typeof fetch;
+
+    try {
+        await assert.rejects(
+            () => createIssue({...config, endpoint: "https://create-issue.example.test/graphql"}, {title: "New issue"}),
+            (error) => error instanceof GitHubGraphQLError && error.status === 503,
+        );
+        assert.equal(queries.filter((query) => /\bmutation\b/i.test(query)).length, 1);
     } finally {
         globalThis.fetch = originalFetch;
     }

@@ -9,6 +9,9 @@ import {parse as parseYaml} from "yaml";
  * - The shell interprets emitted effects (tk/jj operations).
  */
 
+export type WorkflowKind = "task" | "fix";
+export type ManualTestStatus = "undecided" | "pending" | "passed";
+
 export type WorkflowState =
     | "refine"
     | "plan"
@@ -101,6 +104,8 @@ export type IssueDraft = {
  * - activeTaskParentId / activeTaskNextSiblingId are derived by the shell from the current workflow tree.
  */
 export interface WorkflowSnapshot {
+    workflowKind?: WorkflowKind;
+    manualTestStatus?: ManualTestStatus;
     state: WorkflowState;
     rootTaskId: string;
     activeTaskId: string;
@@ -119,6 +124,7 @@ export type AppliedTransitionDecision = {
     state: WorkflowState;
     activeTaskTarget: ActiveTaskTarget;
     effects: WorkflowEffect[];
+    manualTestStatus?: ManualTestStatus;
     reason?: string;
 };
 
@@ -175,9 +181,14 @@ export function parseAssistantOutput(
         return {error: manualTestSubtasksResult.error};
     }
 
+    const requestedStateResult = parseRequestedStateFromAssistantMessage(message);
+    if ("error" in requestedStateResult) {
+        return {error: requestedStateResult.error};
+    }
+
     return {
         parsed: {
-            requestedState: parseRequestedStateFromAssistantMessage(message),
+            requestedState: requestedStateResult.state,
             reviewFindings: reviewFindingsResult ? reviewFindingsResult.drafts : [],
             manualTestSubtasks: manualTestSubtasksResult ? manualTestSubtasksResult.drafts : [],
             commitMessage: parseCommitMessageFromAssistantMessage(message),
@@ -188,13 +199,42 @@ export function parseAssistantOutput(
 export function canReplayCompleteFromAssistantMessage(
     state: WorkflowState,
     assistantMessage: string,
+): boolean;
+export function canReplayCompleteFromAssistantMessage(
+    workflowKind: WorkflowKind,
+    state: WorkflowState,
+    assistantMessage: string,
+): boolean;
+export function canReplayCompleteFromAssistantMessage(
+    kindOrState: WorkflowKind | WorkflowState,
+    stateOrMessage: WorkflowState | string,
+    maybeMessage?: string,
 ): boolean {
+    const workflowKind: WorkflowKind = maybeMessage === undefined ? "task" : kindOrState as WorkflowKind;
+    const state: WorkflowState = maybeMessage === undefined ? kindOrState as WorkflowState : stateOrMessage as WorkflowState;
+    const assistantMessage = maybeMessage === undefined ? stateOrMessage : maybeMessage;
     const parsedResult = parseAssistantOutput(assistantMessage, state);
     if ("error" in parsedResult) {
         return false;
     }
 
     const parsed = parsedResult.parsed;
+
+    if (workflowKind === "fix") {
+        switch (state) {
+            case "review":
+                return parsed.requestedState === "commit"
+                    || parsed.requestedState === "manual-test"
+                    || (parsed.requestedState === "implement-review" && parsed.reviewFindings.length > 0);
+            case "manual-test":
+                return parsed.requestedState === "commit"
+                    || (parsed.requestedState === "implement-review" && parsed.manualTestSubtasks.length > 0);
+            case "commit":
+                return Boolean(parsed.commitMessage);
+            default:
+                return false;
+        }
+    }
 
     switch (state) {
         case "refine":
@@ -235,6 +275,22 @@ export function isWorkflowState(value: string): value is WorkflowState {
  * - 2 => root child child (review-finding implementation)
  */
 export function stateAllowsActiveDepth(state: WorkflowState, depth: number): boolean {
+    return stateAllowsActiveDepthForKind("task", state, depth);
+}
+
+export function stateAllowsActiveDepthForKind(
+    workflowKind: WorkflowKind,
+    state: WorkflowState,
+    depth: number,
+): boolean {
+    if (workflowKind === "fix") {
+        if (depth < 0) return false;
+        if (state === "implement-review") return depth === 1;
+        if (state === "implement" || state === "review" || state === "manual-test" || state === "commit" || state === "complete") {
+            return depth === 0;
+        }
+        return false;
+    }
     if (depth < 0) return false;
 
     if (
@@ -284,6 +340,13 @@ export function eventNeedsRootIssueMarkdown(
 }
 
 export function transition(snapshot: WorkflowSnapshot, event: WorkflowEvent): TransitionDecision {
+    if ((snapshot.workflowKind ?? "task") === "fix") {
+        return transitionFix(snapshot, event);
+    }
+    return transitionTask(snapshot, event);
+}
+
+function transitionTask(snapshot: WorkflowSnapshot, event: WorkflowEvent): TransitionDecision {
     if (event.type === "MANUAL_DONE") {
         if (event.completedState !== snapshot.state) {
             return error(snapshot, event, "Stale MANUAL_DONE event for a different state");
@@ -556,6 +619,143 @@ export function transition(snapshot: WorkflowSnapshot, event: WorkflowEvent): Tr
     }
 }
 
+function transitionFix(snapshot: WorkflowSnapshot, event: WorkflowEvent): TransitionDecision {
+    if (snapshot.manualTestStatus === undefined) {
+        return error(snapshot, event, "Fix workflow snapshot is missing manualTestStatus");
+    }
+    const status = snapshot.manualTestStatus;
+    const validStates: WorkflowState[] = ["implement", "review", "implement-review", "manual-test", "commit", "complete"];
+    if (!validStates.includes(snapshot.state)) {
+        return error(snapshot, event, `State ${snapshot.state} is not valid for fix workflow`);
+    }
+
+    if (event.completedState !== snapshot.state) {
+        return error(snapshot, event, `Stale ${event.type} event for a different state`);
+    }
+
+    if (event.type === "MANUAL_DONE") {
+        if (snapshot.state === "implement") {
+            return moveFix(snapshot, "review", {type: "root"}, status);
+        }
+        if (snapshot.state === "implement-review") {
+            return completeFixImplementReview(snapshot, event, status);
+        }
+        return error(snapshot, event, "MANUAL_DONE is only valid in implement or implement-review");
+    }
+
+    if (event.type === "FORCE_LGTM") {
+        if (snapshot.state !== "review") {
+            return error(snapshot, event, "FORCE_LGTM is only valid in review for fix workflow");
+        }
+        if (status === "passed") {
+            return error(snapshot, event, "Cannot force approval from review after manual testing has already passed");
+        }
+        const nextState = status === "pending" ? "manual-test" : "commit";
+        return moveFix(snapshot, nextState, {type: "root"}, status, [{
+            type: "ADD_NOTE",
+            taskId: snapshot.rootTaskId,
+            note: "Forced LGTM via /fix lgtm (skipping review findings).",
+        }]);
+    }
+
+    const parsedResult = parseAssistantOutput(event.assistantMessage, snapshot.state);
+    if ("error" in parsedResult) {
+        return error(snapshot, event, parsedResult.error);
+    }
+    const parsed = parsedResult.parsed;
+
+    switch (snapshot.state) {
+        case "implement":
+            return moveFix(snapshot, "review", {type: "root"}, status);
+
+        case "review":
+            switch (parsed.requestedState) {
+                case null:
+                    return ignored(snapshot, event);
+                case "implement-review":
+                    if (parsed.reviewFindings.length === 0) {
+                        return error(snapshot, event, "Got <transition>implement-review</transition> but no <review-findings> block");
+                    }
+                    return moveFix(
+                        snapshot,
+                        "implement-review",
+                        {type: "first-created-child", parentTaskId: snapshot.rootTaskId},
+                        status,
+                        toCreateIssueEffects(snapshot.rootTaskId, parsed.reviewFindings),
+                    );
+                case "manual-test":
+                    return moveFix(snapshot, "manual-test", {type: "root"}, "pending");
+                case "commit":
+                    if (status === "pending") {
+                        return error(snapshot, event, "Cannot transition directly to commit while manual testing is pending");
+                    }
+                    if (status !== "undecided") {
+                        return error(snapshot, event, "Direct review to commit is only allowed while manual testing is undecided");
+                    }
+                    return moveFix(snapshot, "commit", {type: "root"}, status);
+                default:
+                    return error(snapshot, event, "Expected findings + <transition>implement-review</transition>, <transition>manual-test</transition>, or <transition>commit</transition>");
+            }
+
+        case "implement-review":
+            return completeFixImplementReview(snapshot, event, status);
+
+        case "manual-test":
+            switch (parsed.requestedState) {
+                case null:
+                    return ignored(snapshot, event);
+                case "commit":
+                    return moveFix(snapshot, "commit", {type: "root"}, "passed");
+                case "implement-review":
+                    if (parsed.manualTestSubtasks.length === 0) {
+                        return error(snapshot, event, "Got <transition>implement-review</transition> but no <manual-test-subtasks> block");
+                    }
+                    return moveFix(
+                        snapshot,
+                        "implement-review",
+                        {type: "first-created-child", parentTaskId: snapshot.rootTaskId},
+                        "pending",
+                        toCreateIssueEffects(snapshot.rootTaskId, parsed.manualTestSubtasks),
+                    );
+                default:
+                    return error(snapshot, event, "Expected <transition>commit</transition> or manual-test subtasks + <transition>implement-review</transition>");
+            }
+
+        case "commit":
+            if (!parsed.commitMessage) {
+                return error(snapshot, event, "Expected <commit-message>...</commit-message>");
+            }
+            return moveFix(snapshot, "complete", {type: "root"}, status, [
+                {type: "CLOSE_ISSUE", taskId: snapshot.rootTaskId},
+                {
+                    type: "RUN_JJ_COMMIT",
+                    message: appendFixesLineFromRootDescription(parsed.commitMessage, event.rootIssueMarkdown),
+                },
+            ]);
+
+        case "complete":
+            return ignored(snapshot, event, "Workflow is complete");
+
+        default:
+            return error(snapshot, event, `State ${snapshot.state} is not valid for fix workflow`);
+    }
+}
+
+function completeFixImplementReview(
+    snapshot: WorkflowSnapshot,
+    event: WorkflowEvent,
+    status: ManualTestStatus,
+): TransitionDecision {
+    if (snapshot.activeTaskParentId !== snapshot.rootTaskId) {
+        return error(snapshot, event, "fix implement-review requires a root child as the active issue");
+    }
+    const effects: WorkflowEffect[] = [{type: "CLOSE_ISSUE", taskId: snapshot.activeTaskId}];
+    if (snapshot.activeTaskNextSiblingId) {
+        return moveFix(snapshot, "implement-review", {type: "next-sibling"}, status, effects);
+    }
+    return moveFix(snapshot, "review", {type: "root"}, status, effects);
+}
+
 function completeImplementReview(snapshot: WorkflowSnapshot, event: WorkflowEvent): TransitionDecision {
     if (!snapshot.activeTaskParentId) {
         return error(snapshot, event, "implement-review requires activeTaskParentId in snapshot");
@@ -581,6 +781,22 @@ function move(
         state,
         activeTaskTarget,
         effects,
+    };
+}
+
+function moveFix(
+    snapshot: WorkflowSnapshot,
+    state: WorkflowState,
+    activeTaskTarget: ActiveTaskTarget,
+    manualTestStatus: ManualTestStatus,
+    effects: WorkflowEffect[] = [],
+): TransitionDecision {
+    return {
+        kind: "applied",
+        state,
+        activeTaskTarget,
+        effects,
+        manualTestStatus,
     };
 }
 
@@ -624,15 +840,22 @@ function toCreateIssueEffects(parentTaskId: string, drafts: IssueDraft[]): Workf
     }));
 }
 
-function parseRequestedStateFromAssistantMessage(messageText: string): WorkflowState | null {
+function parseRequestedStateFromAssistantMessage(
+    messageText: string,
+): {state: WorkflowState | null} | {error: string} {
     const explicitMatches = [...messageText.matchAll(/<transition>\s*([a-z-]+)\s*<\/transition>/gi)];
     for (let i = explicitMatches.length - 1; i >= 0; i--) {
         const raw = explicitMatches[i]?.[1];
         if (!raw) continue;
         const normalized = raw.trim().toLowerCase();
-        if (isWorkflowState(normalized)) return normalized;
+        if (isWorkflowState(normalized)) return {state: normalized};
+        if (i === explicitMatches.length - 1) {
+            return {
+                error: `Unknown workflow transition '${normalized}'. Expected a valid workflow state in <transition>...</transition>.`,
+            };
+        }
     }
-    return null;
+    return {state: null};
 }
 
 type DraftListParseResult =
@@ -679,6 +902,7 @@ function parseYamlIssueList(yamlString: string, label: string): DraftListParseRe
     }
 
     const drafts: IssueDraft[] = [];
+    const seenTitles = new Set<string>();
 
     for (let i = 0; i < parsed.length; i++) {
         const item = parsed[i];
@@ -693,6 +917,11 @@ function parseYamlIssueList(yamlString: string, label: string): DraftListParseRe
         if (!title) {
             return {error: `${label} ${i + 1} is missing a non-empty string 'title'.`};
         }
+
+        if (seenTitles.has(title)) {
+            return {error: `${label} titles must be unique; duplicate title: ${title}`};
+        }
+        seenTitles.add(title);
 
         const description = typeof (item as { description?: unknown }).description === "string"
             ? (item as { description: string }).description

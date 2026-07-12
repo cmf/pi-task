@@ -14,6 +14,7 @@ import {
     parseOriginRemoteUrlFromJjGitRemoteListOutput,
     resolveChildLookupForCreateOrReuse,
     resolveEditorDialogValue,
+    replayAfterErrorsNotice,
     resolveEditorPrefillValue,
     shouldNotifyPendingTransitionOutsideTaskLoop,
 } from "../index.js";
@@ -192,6 +193,11 @@ test("findPendingPromptRunCompletionCandidate recovers from tool errors when a t
         assistantMessage: "implemented",
         hadErrors: true,
     });
+});
+
+test("replay warning uses the command for each workflow kind", () => {
+    assert.match(replayAfterErrorsNotice("task"), /previous \/task run/);
+    assert.match(replayAfterErrorsNotice("fix"), /previous \/fix run/);
 });
 
 test("findPendingPromptRunCompletionCandidate still rejects assistant error turns", () => {

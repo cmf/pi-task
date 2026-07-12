@@ -8,7 +8,8 @@ The workflow file is a task tree rooted at the root issue, plus workflow metadat
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
+  "workflow_kind": "task",
   "task_id": "123",
   "title": "Root task title",
   "subtasks": [],
@@ -20,6 +21,7 @@ The workflow file is a task tree rooted at the root issue, plus workflow metadat
   "last_consumed_assistant_id": null,
   "pending_prompt_run": null,
   "pending_empty_subtask_commit": null,
+  "pending_fix_commit": null,
   "manual_test_followups": [],
   "version": 1,
   "updated_at": "2026-04-11T00:00:00.000Z",
@@ -45,16 +47,33 @@ Each node has:
 Rules:
 
 - task IDs must be unique across the whole tree
-- max depth is 2
+- task workflow max depth is 2
   - depth 0: root
   - depth 1: root subtasks
   - depth 2: review findings under one subtask
+- fix workflow max depth is 1
+  - depth 0: root fix issue
+  - depth 1: review or manual-test follow-up
 - `active_task_id` must exist in the tree
 - `active_path_ids` must exactly match the root-to-active path
 
+## Schema and workflow kind
+
+Schema version 1 is migrated deterministically to schema version 2 by adding `workflow_kind: "task"`. Migration preserves workflow `version` because it is not a state transition. Unknown schema versions remain invalid.
+
+`workflow_kind` is authoritative; never infer it from `state`.
+
+Fix workflows also require:
+
+```json
+"manual_test_status": "undecided"
+```
+
+Allowed values are `undecided`, `pending`, and `passed`. Task workflows must not contain this field.
+
 ## State rules
 
-Valid states:
+Task states:
 
 - `refine`
 - `plan`
@@ -67,7 +86,7 @@ Valid states:
 - `commit`
 - `complete`
 
-Allowed active depth by state:
+Task allowed active depth by state:
 
 - depth 0:
   - `refine`
@@ -82,6 +101,12 @@ Allowed active depth by state:
   - `subtask-commit`
 - depth 2:
   - `implement-review`
+
+Fix allowed states/depths:
+
+- depth 0: `implement`, `review`, `manual-test`, `commit`, `complete`
+- depth 1: `implement-review`
+- invalid: `refine`, `plan`, `review-plan`, `subtask-commit`
 
 ## Important optional fields
 
@@ -116,6 +141,19 @@ Shape:
 
 Use `null` when not in that special recovery path.
 
+### `pending_fix_commit`
+
+Fix-only retry metadata:
+
+```json
+{
+  "commit_message": "fix: correct behavior",
+  "started_at": "2026-07-12T00:00:00.000Z"
+}
+```
+
+The shell persists this before the single fix commit. If the commit succeeds but root closure or workflow persistence fails, `/fix` can verify the matching parent commit and resume finalization without creating a duplicate commit. Do not clear it while recovering a partially completed fix finalization unless you have verified the commit did not happen.
+
 ### `manual_test_followups`
 
 Shape:
@@ -132,19 +170,19 @@ Shape:
 ]
 ```
 
-This records follow-up issues created by `manual-test -> implement`. On later manual-test prompts the extension checks GitHub for each linked issue and injects deterministic context, so closed follow-ups are treated as historical rather than fresh failures.
+This records follow-up issues created by task `manual-test -> implement` or fix `manual-test -> implement-review`. On later manual-test prompts the extension checks GitHub for each linked issue and injects deterministic context, so closed follow-ups are treated as historical rather than fresh failures.
 
 ### `last_consumed_assistant_id`
 
 Usually leave this alone.
 
-Only clear or change it if you intentionally want `/task` to try to replay an assistant completion that has not already been applied.
+Only clear or change it if you intentionally want `/task` or `/fix` to try to replay an assistant completion that has not already been applied.
 
 ### `session_leaf_id`
 
 This ties the workflow to a Pi conversation leaf.
 
-Prefer the built-in recovery first: `/task` can bind `unbound`, rebind some initial workspaces, or prompt to update the leaf automatically when navigation fails.
+Prefer the built-in recovery first: the matching `/task` or `/fix` command can bind `unbound`, rebind an initial workflow, or prompt to update the leaf automatically when navigation fails.
 
 Manual edits are reasonable only when that recovery is otherwise blocked.
 
@@ -182,6 +220,26 @@ This is the workflow model the manual edit must respect.
   - active stays root
 - `commit -> complete`
   - closes root, runs final commit, active stays root
+
+### Fix transition summary
+
+- `implement -> review`: active stays root.
+- `review -> implement-review`: requires depth-1 follow-up nodes under root; active becomes first child.
+- `implement-review -> implement-review`: close current child and activate next sibling.
+- `implement-review -> review`: close final child and return active to root.
+- `review -> manual-test`: set `manual_test_status` to `pending`.
+- `review -> commit`: allowed only while status is `undecided`.
+- `manual-test -> implement-review`: requires depth-1 follow-up nodes and keeps status `pending`.
+- after pending follow-ups, successful review must return to `manual-test`; do not repair directly to `commit`.
+- `manual-test -> commit`: set status to `passed`.
+- `commit -> complete`: requires a non-empty working copy; one `jj commit` succeeds before root closure.
+
+## Fix repair recipes
+
+- If a fix is in root `review` with `manual_test_status: pending`, the safe approval target is root `manual-test`, not `commit`.
+- If a confirmed manual-test failure already has real child issues, set `state: implement-review`, active to the first child, and keep status `pending`.
+- If the final follow-up is complete, close it externally only if that side effect already happened, then return to root `review`; keep status `pending` so verification reruns.
+- Never use the task empty-final-commit parent-description fallback for a fix.
 
 ## Manual edit guidelines by scenario
 

@@ -1,5 +1,5 @@
 ---
-model: openai-codex/gpt-5.5
+model: openai-codex/gpt-5.6-sol
 thinking: high
 ---
 
@@ -46,6 +46,7 @@ tests. Any change having a user-facing component should have a manual testing st
 ## Output / Interaction
 
 - If you need info (environment, platform, how to run app, etc.), ask **one** clarifying question and stop.
+- If a manual-test failure is found, prefer discussion over workflow transition. The first response about a new failure must not transition the workflow unless the user has already explicitly asked you to create follow-up implementation work.
 - Otherwise, present the checklist (briefly) and ask the user to confirm completion.
 
 When (and only when) the user confirms manual verification is complete and successful,
@@ -59,7 +60,28 @@ If the prompt includes `## Previous Manual-Test Follow-ups`, treat those entries
 - Open, in-progress, or unknown-status follow-up issues are already tracking manual-test failures. Do not create duplicate follow-up work for the same observed failure.
 - Do not create follow-up work from stale prose in an older `## Manual Verification` section alone. Only create follow-up work from a fresh failure in the current manual-test pass.
 
-If current manual testing finds new follow-up implementation work:
+## Manual-test failure triage gate
+
+If manual testing reveals a failure, do not immediately create follow-up subtasks.
+
+First, discuss the finding with the user and stop. Your response should include:
+
+- What failed, using the user's observed result or your direct observation.
+- What was expected.
+- Whether the failure appears to be:
+  - a real product/task regression,
+  - an incomplete or incorrect manual test step,
+  - an environment/setup issue,
+  - ambiguous and needing more reproduction detail.
+- One or more plausible fix shapes, described at a high level.
+- Any tradeoffs or uncertainty.
+- A direct question asking whether the user wants this converted into implementation follow-up work.
+
+Do not output `<manual-test-subtasks>` or `<transition>implement</transition>` in this discussion response.
+
+Only after the user explicitly confirms that the failure should become implementation work may you create manual-test follow-up subtasks and transition back to implementation.
+
+After the user confirms that a manual-test failure should become follow-up implementation work:
 
 1. Update the root issue's `## Manual Verification` section with a concise failure summary and repro notes using `task_issue_insert_section` if the section is missing or `task_issue_edit_section` if it exists.
 2. Output a `<manual-test-subtasks>...</manual-test-subtasks>` block containing a YAML list of subtask objects using the same schema as plan subtasks:

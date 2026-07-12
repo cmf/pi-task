@@ -816,3 +816,203 @@ test("FORCE_LGTM is rejected in unsupported states", () => {
     expectKind(decision, "rejected");
     assert.equal(decision.reason, "FORCE_LGTM is only valid in review-plan or review");
 });
+
+function makeFixSnapshot(
+    state: WorkflowState,
+    manualTestStatus: "undecided" | "pending" | "passed" = "undecided",
+    overrides: Partial<WorkflowSnapshot> = {},
+): WorkflowSnapshot {
+    return {
+        ...makeSnapshot(state),
+        workflowKind: "fix",
+        manualTestStatus,
+        ...overrides,
+    };
+}
+
+test("fix implement advances at the root to review", () => {
+    const decision = transition(makeFixSnapshot("implement"), complete("implement", "implemented"));
+    expectKind(decision, "applied");
+    assert.equal(decision.state, "review");
+    assert.deepEqual(decision.activeTaskTarget, {type: "root"});
+});
+
+test("fix review can approve directly to commit while manual testing is undecided", () => {
+    const decision = transition(makeFixSnapshot("review"), complete("review", "<transition>commit</transition>"));
+    expectKind(decision, "applied");
+    assert.equal(decision.state, "commit");
+    assert.equal(decision.manualTestStatus, "undecided");
+});
+
+test("fix review rejects direct commit when manual-test status is missing", () => {
+    const decision = transition(
+        makeSnapshot("review", {workflowKind: "fix"}),
+        complete("review", "<transition>commit</transition>"),
+    );
+
+    expectKind(decision, "rejected");
+    assert.equal(decision.reason, "Fix workflow snapshot is missing manualTestStatus");
+});
+
+test("fix review can select manual-test and latches it pending", () => {
+    const decision = transition(makeFixSnapshot("review"), complete("review", "<transition>manual-test</transition>"));
+    expectKind(decision, "applied");
+    assert.equal(decision.state, "manual-test");
+    assert.equal(decision.manualTestStatus, "pending");
+});
+
+test("fix review creates root finding issues", () => {
+    const decision = transition(
+        makeFixSnapshot("review"),
+        complete("review", `
+<review-findings>
+- title: Fix regression
+  description: Cover the missed edge case
+</review-findings>
+<transition>implement-review</transition>`),
+    );
+    expectKind(decision, "applied");
+    assert.equal(decision.state, "implement-review");
+    assert.deepEqual(decision.activeTaskTarget, {type: "first-created-child", parentTaskId: ROOT});
+});
+
+test("fix review rejects duplicate finding titles before creating issues", () => {
+    const decision = transition(
+        makeFixSnapshot("review"),
+        complete("review", `
+<review-findings>
+- title: Fix regression
+  description: Cover one edge case
+- title: Fix regression
+  description: Cover another edge case
+</review-findings>
+<transition>implement-review</transition>`),
+    );
+
+    expectKind(decision, "rejected");
+    assert.equal(decision.reason, "Finding titles must be unique; duplicate title: Fix regression");
+    assert.deepEqual(decision.effects, []);
+});
+
+test("fix implement-review iterates root children and returns to root review", () => {
+    const next = transition(makeFixSnapshot("implement-review", "pending", {
+        activeTaskId: FINDING,
+        activeTaskParentId: ROOT,
+        activeTaskNextSiblingId: NEXT,
+    }), complete("implement-review"));
+    expectKind(next, "applied");
+    assert.equal(next.state, "implement-review");
+    assert.deepEqual(next.activeTaskTarget, {type: "next-sibling"});
+
+    const final = transition(makeFixSnapshot("implement-review", "pending", {
+        activeTaskId: FINDING,
+        activeTaskParentId: ROOT,
+    }), complete("implement-review"));
+    expectKind(final, "applied");
+    assert.equal(final.state, "review");
+    assert.deepEqual(final.activeTaskTarget, {type: "root"});
+    assert.equal(final.manualTestStatus, "pending");
+});
+
+test("fix done supports implement and implement-review", () => {
+    const implement = transition(makeFixSnapshot("implement"), manualDone("implement"));
+    expectKind(implement, "applied");
+    assert.equal(implement.state, "review");
+
+    const finding = transition(makeFixSnapshot("implement-review", "pending", {
+        activeTaskId: FINDING,
+        activeTaskParentId: ROOT,
+    }), manualDone("implement-review"));
+    expectKind(finding, "applied");
+    assert.equal(finding.state, "review");
+});
+
+test("fix lgtm respects the manual-test latch", () => {
+    const undecided = transition(makeFixSnapshot("review"), {type: "FORCE_LGTM", completedState: "review"});
+    expectKind(undecided, "applied");
+    assert.equal(undecided.state, "commit");
+
+    const pending = transition(makeFixSnapshot("review", "pending"), {type: "FORCE_LGTM", completedState: "review"});
+    expectKind(pending, "applied");
+    assert.equal(pending.state, "manual-test");
+
+    const passed = transition(makeFixSnapshot("review", "passed"), {type: "FORCE_LGTM", completedState: "review"});
+    expectKind(passed, "rejected");
+});
+
+test("fix rejects task-only states", () => {
+    const decision = transition(makeFixSnapshot("plan"), complete("plan", "<transition>review-plan</transition>"));
+    expectKind(decision, "rejected");
+    assert.match(decision.reason, /not valid for fix workflow/);
+});
+
+test("fix review cannot skip pending or already-passed manual testing", () => {
+    const pending = transition(makeFixSnapshot("review", "pending"), complete("review", "<transition>commit</transition>"));
+    expectKind(pending, "rejected");
+    assert.match(pending.reason, /manual testing is pending/);
+
+    const passed = transition(makeFixSnapshot("review", "passed"), complete("review", "<transition>commit</transition>"));
+    expectKind(passed, "rejected");
+    assert.match(passed.reason, /only allowed while manual testing is undecided/);
+});
+
+test("fix manual-test success marks testing passed and moves to commit", () => {
+    const decision = transition(makeFixSnapshot("manual-test", "pending"), complete("manual-test", "<transition>commit</transition>"));
+    expectKind(decision, "applied");
+    assert.equal(decision.state, "commit");
+    assert.equal(decision.manualTestStatus, "passed");
+});
+
+test("fix manual-test rejects success when manual-test status is missing", () => {
+    const decision = transition(
+        makeSnapshot("manual-test", {workflowKind: "fix"}),
+        complete("manual-test", "<transition>commit</transition>"),
+    );
+
+    expectKind(decision, "rejected");
+    assert.equal(decision.reason, "Fix workflow snapshot is missing manualTestStatus");
+});
+
+test("fix manual-test creates root follow-ups and moves to implement-review", () => {
+    const decision = transition(makeFixSnapshot("manual-test", "pending"), complete("manual-test", `
+<manual-test-subtasks>
+- title: Fix failed verification
+  description: Repair the observed behavior
+</manual-test-subtasks>
+<transition>implement-review</transition>`));
+    expectKind(decision, "applied");
+    assert.equal(decision.state, "implement-review");
+    assert.equal(decision.manualTestStatus, "pending");
+    assert.deepEqual(decision.activeTaskTarget, {type: "first-created-child", parentTaskId: ROOT});
+});
+
+test("fix manual-test rejects duplicate follow-up titles before creating issues", () => {
+    const decision = transition(makeFixSnapshot("manual-test", "pending"), complete("manual-test", `
+<manual-test-subtasks>
+- title: Fix failed verification
+  description: Repair one failure
+- title: Fix failed verification
+  description: Repair another failure
+</manual-test-subtasks>
+<transition>implement-review</transition>`));
+
+    expectKind(decision, "rejected");
+    assert.equal(decision.reason, "Subtask titles must be unique; duplicate title: Fix failed verification");
+    assert.deepEqual(decision.effects, []);
+});
+
+test("fix review returns to manual-test after follow-up implementation", () => {
+    const decision = transition(makeFixSnapshot("review", "pending"), complete("review", "<transition>manual-test</transition>"));
+    expectKind(decision, "applied");
+    assert.equal(decision.state, "manual-test");
+});
+
+test("fix commit closes the root and creates the single commit", () => {
+    const decision = transition(makeFixSnapshot("commit", "passed"), complete("commit", "<commit-message>fix: finish issue</commit-message>"));
+    expectKind(decision, "applied");
+    assert.equal(decision.state, "complete");
+    assert.deepEqual(decision.effects, [
+        {type: "CLOSE_ISSUE", taskId: ROOT},
+        {type: "RUN_JJ_COMMIT", message: "fix: finish issue"},
+    ]);
+});

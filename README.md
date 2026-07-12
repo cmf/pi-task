@@ -2,7 +2,7 @@
 
 `pi-task` is a Pi extension that turns AI-assisted coding into a deterministic, ticket-driven workflow. It connects GitHub Issues, `jj` workspaces, and Pi's agent loop so that each task gets its own isolated workspace, explicit workflow state, review gates, subtasks, commits, and final squash-merge path.
 
-The core idea is: instead of asking an agent to "go build this", the extension drives it through a structured lifecycle: refine, plan, review the plan, implement, review, fix findings, manual test, commit, and merge.
+The core idea is: instead of asking an agent to "go build this", the extension drives it through an explicit lifecycle. `/task` uses refine, plan, plan review, per-subtask implementation/review/commits, manual test, final commit, and merge. `/fix` is a shorter workflow for root issues that are already specific enough to implement directly.
 
 It's designed to require my attention only at specific points, so that I can run different tasks asynchronously (including homeschooling etc).
 
@@ -47,6 +47,35 @@ stateDiagram-v2
     commit --> complete
     complete --> [*]
 ```
+
+## Fix workflow
+
+Use `/fix` when the selected root issue already contains a complete implementation specification and does not need refinement, planning, or plan review. Use `/task` when requirements are still unclear, the work benefits from an explicit reviewed plan, or separate subtask commits are useful.
+
+```mermaid
+stateDiagram-v2
+    [*] --> implement
+    implement --> review
+    review --> implement_review: findings
+    implement_review --> implement_review: next follow-up
+    implement_review --> review: final follow-up
+    review --> manual_test: manual verification useful/pending
+    review --> commit: automated verification sufficient
+    manual_test --> implement_review: confirmed failure follow-ups
+    manual_test --> commit: verification passed
+    commit --> complete
+```
+
+Commands:
+
+- `/fix`: start or resume a fix workflow.
+- `/fix done`: manually complete `implement` or `implement-review` when automatic advancement was missed.
+- `/fix lgtm`: approve `review`; it moves to `manual-test` when manual testing is pending, otherwise to `commit`.
+- `/fix apply` is intentionally unsupported.
+
+Fix workflows produce one final implementation commit. Review findings and confirmed manual-test failures become root child issues, but are not committed separately. A manual-test latch prevents review from skipping a required rerun after a failed pass. Empty final fix commits are blocked before the root issue is closed.
+
+Persisted workflows include `workflow_kind: "task" | "fix"`. Schema-version-1 files migrate to schema version 2 as task workflows without incrementing the workflow transition version.
 
 ## Future plans
 

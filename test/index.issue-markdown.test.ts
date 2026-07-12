@@ -6,7 +6,7 @@ import {transition, type WorkflowSnapshot} from "../state-machine.js";
 
 const {formatCreatedChildIssueBody, formatReusedChildIssueBody, formatWorkspaceCreationFailureMessage, formatWorkflowIssueBodyMarkdown, formatWorkflowIssueMarkdown} = taskExtension as {
     formatCreatedChildIssueBody?: (description: string, tdd: boolean) => string;
-    formatReusedChildIssueBody?: (existingBody: string, tdd: boolean) => string;
+    formatReusedChildIssueBody?: (existingBody: string, description: string, tdd: boolean) => string;
     formatWorkspaceCreationFailureMessage?: (stderr: string) => string;
     formatWorkflowIssueBodyMarkdown?: (issue: {
         title: string;
@@ -33,7 +33,7 @@ test("formatReusedChildIssueBody appends tdd false marker for reused open issues
     assert.equal(typeof formatReusedChildIssueBody, "function");
 
     assert.equal(
-        formatReusedChildIssueBody!("Existing issue body", false),
+        formatReusedChildIssueBody!("Existing issue body", "Existing issue body", false),
         "Existing issue body\n\n<!-- tdd: false -->",
     );
 });
@@ -42,7 +42,7 @@ test("formatReusedChildIssueBody does not duplicate existing tdd false marker", 
     assert.equal(typeof formatReusedChildIssueBody, "function");
 
     assert.equal(
-        formatReusedChildIssueBody!("Existing issue body\n\n<!-- tdd: false -->", false),
+        formatReusedChildIssueBody!("Existing issue body\n\n<!-- tdd: false -->", "Existing issue body", false),
         "Existing issue body\n\n<!-- tdd: false -->",
     );
 });
@@ -51,8 +51,21 @@ test("formatReusedChildIssueBody removes stale tdd false marker when TDD is requ
     assert.equal(typeof formatReusedChildIssueBody, "function");
 
     assert.equal(
-        formatReusedChildIssueBody!("Existing issue body\n\n<!-- tdd: false -->", true),
+        formatReusedChildIssueBody!("Existing issue body\n\n<!-- tdd: false -->", "Existing issue body", true),
         "Existing issue body",
+    );
+});
+
+test("formatReusedChildIssueBody replaces stale description and preserves workflow sections", () => {
+    assert.equal(typeof formatReusedChildIssueBody, "function");
+
+    assert.equal(
+        formatReusedChildIssueBody!(
+            "Old finding details\n\n## Plan\n\n- useful progress",
+            "Updated finding details",
+            true,
+        ),
+        "Updated finding details\n\n## Plan\n\n- useful progress",
     );
 });
 

@@ -1,5 +1,5 @@
 ---
-model: openai-codex/gpt-5.5
+model: openai-codex/gpt-5.6-sol
 thinking: high
 fast: true
 ---
@@ -33,21 +33,33 @@ Start by understanding the current project context, then ask questions one at a 
 
 **Presenting the design:**
 - Once you believe you understand what you're building, present the design
-- Break it into sections of 200-300 words
+- Break it into small sections only when useful; keep each section brief and focused
 - Ask after each section whether it looks right so far
 - Cover: architecture, components, data flow, error handling, testing
 - Be ready to go back and clarify if something doesn't make sense
 
+**Concision:**
+- The final design replaces the full issue body, so it must stand alone.
+- Include the context, requirements, and decisions needed for planning/implementation, but state them once and keep them brief.
+- Prefer bullets over prose where they improve clarity.
+- Do not preserve brainstorming, rejected alternatives, or stale original text unless it is part of the final agreed design.
+- Do not include workflow-owned sections such as `## Plan`, `## Manual Test Plan`, `## Manual Verification`, or `## Summary of Changes`; later workflow stages add those.
+- Avoid speculative architecture, exhaustive edge-case lists, and future enhancements unless they are required.
+- If a section would be mostly boilerplate, omit it or write “No special handling required.”
+
 ## When the design is complete and unambiguous
 
 **Documentation (required):**
-- Write the validated design into the active issue **description** using `task_issue_edit_description`:
-  - `target: "active"`
-  - `edits: [{ oldText: <current placeholder/old design text>, newText: <final description markdown> }]`
-- If the current description is empty, initialize it with `oldText: ""`.
-- Prefer replacing the exact placeholder or stale design text rather than unrelated issue content.
-- Do not include level-2 markdown headers (`## ...`) in description content; use `###` or lower inside the description.
-- Keep it clear and concise.
+- Replace the entire active issue body with the validated final design using `gh issue edit`.
+- Use the `Active Issue ID` from the Issue Metadata at the top of this prompt as the issue identifier. In refine, this is the root issue id from `.tasks/workflow.json` (`active_task_id` should equal `task_id`).
+- Use `--body-file` rather than inline `--body` so multiline markdown is preserved safely. For example:
+  1. Write the final body markdown to a temporary file.
+  2. Run `gh issue edit <Active Issue ID> --body-file <temp-file>`.
+- The replacement body must contain only the final standalone design. Do not include the `# Title` line shown in the issue context unless the user explicitly wants that title repeated in the body.
+- Do not preserve stale original issue text, old drafts, brainstorming, rejected alternatives, or previous designs.
+- Do not use `task_issue_edit_description`, `task_issue_edit_section`, or `task_issue_insert_section` during refine for the final rewrite.
+- Markdown subheadings are allowed in the design, but do not add workflow-owned sections such as `## Plan`, `## Manual Test Plan`, `## Manual Verification`, or `## Summary of Changes`.
+- Keep it clear and concise; write the shortest standalone design that would let another agent plan the work correctly.
 
 Do not ask the user to edit the issue manually.
 

@@ -9,6 +9,7 @@ import taskExtension, {
     findMarkdownSectionRange,
     insertMarkdownSection,
     parseIssueNumberFromTaskId,
+    buildTaskIssueHandlingHeader,
 } from "../index.js";
 import * as indexModule from "../index.js";
 
@@ -31,6 +32,21 @@ test("legacy markdown helper APIs are not exported", () => {
 
     assert.equal(descriptionHelper in indexModule, false);
     assert.equal(sectionHelper in indexModule, false);
+});
+
+test("refine issue handling header instructs full active issue body replacement via gh", () => {
+    const header = buildTaskIssueHandlingHeader({
+        workflowVersion: 3,
+        workflowState: "refine",
+        activeIssueId: "123",
+        activePathIds: ["123"],
+    });
+
+    assert.match(header, /Active Issue ID: 123/);
+    assert.match(header, /replace the entire active issue body/i);
+    assert.match(header, /gh issue edit/);
+    assert.match(header, /--body-file/);
+    assert.doesNotMatch(header, /For issue content updates, use the targeted tools/);
 });
 
 test("applyEditsToNormalizedContent matches Pi fuzzy edit normalization", () => {
@@ -330,17 +346,20 @@ test("markdown section and description helpers reject level-2 headers in generat
     assert.equal(insertMarkdownSection("Intro", "## Plan", "### Allowed"), "Intro\n\n## Plan\n### Allowed");
 });
 
-test("default export registers the three targeted issue edit tools only", () => {
+test("default export registers task and fix commands plus the three targeted issue edit tools", () => {
     const tools: Array<{name: string; description?: string}> = [];
+    const commands: string[] = [];
     const pi = {
         on() {},
-        registerCommand() {},
+        registerCommand(name: string) { commands.push(name); },
         registerTool(tool: {name: string; description?: string}) {
             tools.push(tool);
         },
     };
 
     taskExtension(pi as never);
+
+    assert.deepEqual(commands, ["task", "fix"]);
 
     const toolNames = tools.map((tool) => tool.name);
     assert.deepEqual(

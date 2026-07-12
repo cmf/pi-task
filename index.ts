@@ -17,7 +17,7 @@ import {
     canReplayCompleteFromAssistantMessage,
     eventNeedsRootIssueMarkdown,
     isWorkflowState,
-    stateAllowsActiveDepth,
+    stateAllowsActiveDepthForKind as stateAllowsActiveDepthForKindMachine,
     transition as runWorkflowTransition,
     type ActiveTaskTarget as MachineActiveTaskTarget,
     type AppliedTransitionDecision as MachineAppliedTransitionDecision,
@@ -26,6 +26,8 @@ import {
     type WorkflowEvent as MachineWorkflowEvent,
     type WorkflowSnapshot as MachineWorkflowSnapshot,
     type WorkflowState as MachineWorkflowState,
+    type WorkflowKind,
+    type ManualTestStatus,
 } from "./state-machine.js";
 import {
     addIssueComment,
@@ -46,7 +48,7 @@ import fs from "node:fs";
 import {fileURLToPath} from "node:url";
 
 const DEFAULT_AGENT_START_TIMEOUT_MS = 10000;
-const WORKFLOW_SCHEMA_VERSION = 1;
+const WORKFLOW_SCHEMA_VERSION = 2;
 const WORKFLOW_DIR_NAME = ".tasks";
 const WORKFLOW_FILE_NAME = "workflow.json";
 const UNBOUND_SESSION_LEAF_ID = "unbound";
@@ -117,6 +119,14 @@ type TaskIssueBodyEditInput =
     | {tool: "task_issue_edit_section"; section: TaskIssueSection; edits: Edit[]}
     | {tool: "task_issue_edit_description"; edits: Edit[]};
 
+export function validateWorkflowCommandKind(
+    commandKind: WorkflowKind,
+    persistedKind: WorkflowKind,
+): {ok: true} | {error: string} {
+    if (commandKind === persistedKind) return {ok: true};
+    return {error: persistedKind === "fix" ? "This is a fix workspace. Run /fix." : "This is a task workspace. Run /task."};
+}
+
 export function normalizeSessionFilePath(sessionFile: string | undefined): string | null {
     if (!sessionFile) return null;
     const trimmed = sessionFile.trim();
@@ -124,6 +134,7 @@ export function normalizeSessionFilePath(sessionFile: string | undefined): strin
 }
 
 export function shouldNotifyPendingTransitionOutsideTaskLoop(params: {
+    workflowKind?: WorkflowKind;
     workflowState: MachineWorkflowState;
     latestAssistantMessageId: string | null;
     latestAssistantMessageText: string;
@@ -133,11 +144,12 @@ export function shouldNotifyPendingTransitionOutsideTaskLoop(params: {
     if (params.taskLoopActive) return false;
     if (!params.latestAssistantMessageId) return false;
     if ((params.lastConsumedAssistantId ?? null) === params.latestAssistantMessageId) return false;
-    return canReplayCompleteFromAssistantMessage(params.workflowState, params.latestAssistantMessageText);
+    return canReplayCompleteFromAssistantMessage(params.workflowKind ?? "task", params.workflowState, params.latestAssistantMessageText);
 }
 
 export function findPendingPromptRunCompletionCandidate(params: {
     branch: Array<{type?: string; id?: unknown; message?: unknown}>;
+    workflowKind?: WorkflowKind;
     pendingPromptRun?: PendingPromptRun | null;
     workflowState: MachineWorkflowState;
     activeTaskId: string;
@@ -245,15 +257,20 @@ export function findPendingPromptRunCompletionCandidate(params: {
     return candidate;
 }
 
+export function replayAfterErrorsNotice(workflowKind: WorkflowKind): string {
+    return `The previous /${workflowKind} run reported tool errors, but the agent later produced a completion. Replaying that completion now.`;
+}
+
 export function completionReadyToMergeNotice(params: {
     changed: boolean;
     nextState: MachineWorkflowState;
+    workflowKind?: WorkflowKind;
 }): string | null {
     if (!params.changed || params.nextState !== "complete") {
         return null;
     }
 
-    return "Final commit succeeded. Task workspace is ready to merge.";
+    return `Final commit succeeded. ${params.workflowKind === "fix" ? "Fix" : "Task"} workspace is ready to merge.`;
 }
 
 export function resolveEditorPrefillValue(
@@ -892,25 +909,42 @@ export function buildTaskApplyPrompt(params: {finding: string; rootIssueMarkdown
 }
 
 export function buildTaskIssueHandlingHeader(params: {
+    workflowKind?: WorkflowKind;
     workflowVersion: number;
     workflowState: string;
+    manualTestStatus?: ManualTestStatus;
     activeIssueId: string;
     activePathIds: string[];
 }): string {
+    const issueHandlingRules = params.workflowState === "refine"
+        ? [
+            "- In refine, replace the entire active issue body with the final standalone design using `gh issue edit`; do not use the targeted task issue editing tools for this rewrite.",
+            "- Use the Active Issue ID above as the `gh issue edit` issue identifier. In refine, this is the root issue id from `.tasks/workflow.json`.",
+            "- Safe form: write the final body to a temporary markdown file, then run `gh issue edit <Active Issue ID> --body-file <temp-file>`.",
+            "- Do not include the `# Title` line from the issue context in the replacement body unless the user explicitly wants it in the body.",
+            "- Do NOT ask the user to manually edit issue contents.",
+            "- Do NOT manually perform issue lifecycle actions (close/reopen/in-progress markers); the extension controls workflow transitions.",
+        ]
+        : [
+            "- For issue content updates, use the targeted tools: `task_issue_insert_section`, `task_issue_edit_section`, and `task_issue_edit_description`.",
+            "- If a workflow section is missing, use `task_issue_insert_section`; if it exists, use `task_issue_edit_section` with small, unique `oldText` blocks.",
+            "- If stale requirements or design text in the issue description need correction, use `task_issue_edit_description`.",
+            "- Do not include `##` headers in section or description content; use `###` or lower inside a section.",
+            "- Do NOT ask the user to manually edit issue contents.",
+            "- Do NOT manually perform issue lifecycle actions (close/reopen/in-progress markers); the extension controls workflow transitions.",
+        ];
+
     return [
         "## Issue Metadata",
+        `- Workflow Kind: ${params.workflowKind ?? "task"}`,
         `- Workflow Version: ${params.workflowVersion}`,
         `- Workflow State: ${params.workflowState}`,
+        ...(params.manualTestStatus ? [`- Manual Test Status: ${params.manualTestStatus}`] : []),
         `- Active Issue ID: ${params.activeIssueId}`,
         `- Active Path: ${params.activePathIds.join(" -> ")}`,
         "",
         "## Issue Handling Rules (critical)",
-        "- For issue content updates, use the targeted tools: `task_issue_insert_section`, `task_issue_edit_section`, and `task_issue_edit_description`.",
-        "- If a workflow section is missing, use `task_issue_insert_section`; if it exists, use `task_issue_edit_section` with small, unique `oldText` blocks.",
-        "- If stale requirements or design text in the issue description need correction, use `task_issue_edit_description`.",
-        "- Do not include `##` headers in section or description content; use `###` or lower inside a section.",
-        "- Do NOT ask the user to manually edit issue contents.",
-        "- Do NOT manually perform issue lifecycle actions (close/reopen/in-progress markers); the extension controls workflow transitions.",
+        ...issueHandlingRules,
         "",
         "## Issue Contents",
         "The following is the current issue context chain (root -> ... -> active):",
@@ -1222,6 +1256,11 @@ type PendingEmptySubtaskCommit = {
     commit_message: string;
 };
 
+type PendingFixCommit = {
+    commit_message: string;
+    started_at: string;
+};
+
 type PendingPromptRun = {
     state: MachineWorkflowState;
     active_task_id: string;
@@ -1244,8 +1283,10 @@ export type ManualTestFollowupWithStatus = ManualTestFollowup & {
     status: ManualTestFollowupStatus;
 };
 
-type PersistedWorkflow = TaskNode & {
+export type PersistedWorkflow = TaskNode & {
     schema_version: number;
+    workflow_kind: WorkflowKind;
+    manual_test_status?: ManualTestStatus;
     state: MachineWorkflowState;
     active_task_id: string;
     active_path_ids: string[];
@@ -1254,6 +1295,8 @@ type PersistedWorkflow = TaskNode & {
     last_consumed_assistant_id?: string | null;
     pending_prompt_run?: PendingPromptRun | null;
     pending_empty_subtask_commit?: PendingEmptySubtaskCommit | null;
+    pending_fix_commit?: PendingFixCommit | null;
+    pending_task_commit?: PendingFixCommit | null;
     manual_test_followups?: ManualTestFollowup[];
     version: number;
     updated_at: string;
@@ -1336,6 +1379,8 @@ function cloneWorkflow(workflow: PersistedWorkflow): PersistedWorkflow {
     return {
         ...cloneTaskNode(workflow),
         schema_version: workflow.schema_version,
+        workflow_kind: workflow.workflow_kind,
+        manual_test_status: workflow.manual_test_status,
         state: workflow.state,
         active_task_id: workflow.active_task_id,
         active_path_ids: [...workflow.active_path_ids],
@@ -1347,6 +1392,12 @@ function cloneWorkflow(workflow: PersistedWorkflow): PersistedWorkflow {
             : null,
         pending_empty_subtask_commit: workflow.pending_empty_subtask_commit
             ? {...workflow.pending_empty_subtask_commit}
+            : null,
+        pending_fix_commit: workflow.pending_fix_commit
+            ? {...workflow.pending_fix_commit}
+            : null,
+        pending_task_commit: workflow.pending_task_commit
+            ? {...workflow.pending_task_commit}
             : null,
         manual_test_followups: (workflow.manual_test_followups ?? []).map((followup) => ({...followup})),
         version: workflow.version,
@@ -1401,6 +1452,7 @@ function validateTaskTreeNode(
     node: TaskNode,
     depth: number,
     seen: Set<string>,
+    maxDepth = 2,
 ): string | null {
     if (!node.task_id || typeof node.task_id !== "string") {
         return "workflow node is missing non-empty string task_id";
@@ -1416,16 +1468,24 @@ function validateTaskTreeNode(
     }
     seen.add(node.task_id);
 
-    if (depth > 2) {
-        return `workflow tree depth exceeds 2 at ${node.task_id}`;
+    if (depth > maxDepth) {
+        return `workflow tree depth exceeds ${maxDepth} at ${node.task_id}`;
     }
 
     for (const child of node.subtasks) {
-        const err = validateTaskTreeNode(child, depth + 1, seen);
+        const err = validateTaskTreeNode(child, depth + 1, seen, maxDepth);
         if (err) return err;
     }
 
     return null;
+}
+
+function isWorkflowKind(value: unknown): value is WorkflowKind {
+    return value === "task" || value === "fix";
+}
+
+function isManualTestStatus(value: unknown): value is ManualTestStatus {
+    return value === "undecided" || value === "pending" || value === "passed";
 }
 
 function validateWorkflow(workflow: PersistedWorkflow): string | null {
@@ -1434,6 +1494,30 @@ function validateWorkflow(workflow: PersistedWorkflow): string | null {
     }
     if (workflow.schema_version !== WORKFLOW_SCHEMA_VERSION) {
         return `workflow schema mismatch (expected ${WORKFLOW_SCHEMA_VERSION}, found ${workflow.schema_version})`;
+    }
+
+    if (!isWorkflowKind(workflow.workflow_kind)) {
+        return `workflow.workflow_kind is invalid: ${String(workflow.workflow_kind)}`;
+    }
+
+    if (workflow.workflow_kind === "fix") {
+        if (!isManualTestStatus(workflow.manual_test_status)) {
+            return `fix workflow.manual_test_status is invalid: ${String(workflow.manual_test_status)}`;
+        }
+    } else if (workflow.manual_test_status !== undefined) {
+        return "task workflow must not contain manual_test_status";
+    }
+
+    if (workflow.workflow_kind === "fix") {
+        if (workflow.state === "manual-test" && workflow.manual_test_status !== "pending") {
+            return "fix manual-test requires manual_test_status pending";
+        }
+        if (workflow.manual_test_status === "passed" && workflow.state !== "commit" && workflow.state !== "complete") {
+            return "fix manual_test_status passed is only valid in commit or complete";
+        }
+        if ((workflow.state === "commit" || workflow.state === "complete") && workflow.manual_test_status === "pending") {
+            return "fix commit or complete cannot have manual_test_status pending";
+        }
     }
 
     if (!Number.isInteger(workflow.version) || workflow.version < 1) {
@@ -1505,11 +1589,41 @@ function validateWorkflow(workflow: PersistedWorkflow): string | null {
         return "workflow.pending_empty_subtask_commit must be null/undefined or {task_id, commit_message}";
     }
 
+    if (
+        workflow.pending_task_commit !== undefined
+        && workflow.pending_task_commit !== null
+        && (
+            workflow.workflow_kind !== "task"
+            || !isObject(workflow.pending_task_commit)
+            || typeof workflow.pending_task_commit.commit_message !== "string"
+            || !workflow.pending_task_commit.commit_message.trim()
+            || typeof workflow.pending_task_commit.started_at !== "string"
+            || !workflow.pending_task_commit.started_at.trim()
+        )
+    ) {
+        return "workflow.pending_task_commit must be null/undefined or task {commit_message, started_at}";
+    }
+
+    if (
+        workflow.pending_fix_commit !== undefined
+        && workflow.pending_fix_commit !== null
+        && (
+            workflow.workflow_kind !== "fix"
+            || !isObject(workflow.pending_fix_commit)
+            || typeof workflow.pending_fix_commit.commit_message !== "string"
+            || !workflow.pending_fix_commit.commit_message.trim()
+            || typeof workflow.pending_fix_commit.started_at !== "string"
+            || !workflow.pending_fix_commit.started_at.trim()
+        )
+    ) {
+        return "workflow.pending_fix_commit must be null/undefined or fix {commit_message, started_at}";
+    }
+
     if (workflow.manual_test_followups !== undefined) {
         if (!Array.isArray(workflow.manual_test_followups)) {
             return "workflow.manual_test_followups must be undefined or an array";
         }
-        const seenFollowups = new Set<string>();
+        const seenFollowupIssueIds = new Set<string>();
         for (const followup of workflow.manual_test_followups) {
             if (
                 !isObject(followup)
@@ -1526,10 +1640,10 @@ function validateWorkflow(workflow: PersistedWorkflow): string | null {
             ) {
                 return "workflow.manual_test_followups entries must contain issue_id, title, fingerprint, created_at, and from_manual_test_version";
             }
-            if (seenFollowups.has(followup.fingerprint)) {
-                return `duplicate manual_test_followups fingerprint: ${followup.fingerprint}`;
+            if (seenFollowupIssueIds.has(followup.issue_id)) {
+                return `duplicate manual_test_followups issue_id: ${followup.issue_id}`;
             }
-            seenFollowups.add(followup.fingerprint);
+            seenFollowupIssueIds.add(followup.issue_id);
         }
     }
 
@@ -1537,7 +1651,7 @@ function validateWorkflow(workflow: PersistedWorkflow): string | null {
         return `workflow.state is invalid: ${String(workflow.state)}`;
     }
 
-    const treeError = validateTaskTreeNode(workflow, 0, new Set<string>());
+    const treeError = validateTaskTreeNode(workflow, 0, new Set<string>(), workflow.workflow_kind === "fix" ? 1 : 2);
     if (treeError) return treeError;
 
     const activeNode = findNodeById(workflow, workflow.active_task_id);
@@ -1561,22 +1675,32 @@ function validateWorkflow(workflow: PersistedWorkflow): string | null {
     }
 
     const activeDepth = workflow.active_path_ids.length - 1;
-    if (!stateAllowsActiveDepth(workflow.state, activeDepth)) {
-        return `state ${workflow.state} is incompatible with active depth ${activeDepth}`;
+    if (!stateAllowsActiveDepthForKindMachine(workflow.workflow_kind, workflow.state, activeDepth)) {
+        return workflow.workflow_kind === "fix"
+            ? `state ${workflow.state} is not valid for fix workflow at active depth ${activeDepth}`
+            : `state ${workflow.state} is incompatible with active depth ${activeDepth}`;
     }
 
     return null;
 }
 
-function createInitialWorkflow(rootTaskId: string, rootTitle: string, sessionLeafId: string): PersistedWorkflow {
+export function createInitialWorkflow(
+    workflowKind: WorkflowKind,
+    rootTaskId: string,
+    rootTitle: string,
+    sessionLeafId: string,
+): PersistedWorkflow {
     const normalizedTitle = rootTitle.trim() || rootTaskId;
     const now = new Date().toISOString();
+    const initialState: MachineWorkflowState = workflowKind === "fix" ? "implement" : "refine";
     return {
         schema_version: WORKFLOW_SCHEMA_VERSION,
+        workflow_kind: workflowKind,
+        ...(workflowKind === "fix" ? {manual_test_status: "undecided" as const} : {}),
         task_id: rootTaskId,
         title: normalizedTitle,
         subtasks: [],
-        state: "refine",
+        state: initialState,
         active_task_id: rootTaskId,
         active_path_ids: [rootTaskId],
         session_leaf_id: sessionLeafId,
@@ -1584,13 +1708,15 @@ function createInitialWorkflow(rootTaskId: string, rootTitle: string, sessionLea
         last_consumed_assistant_id: null,
         pending_prompt_run: null,
         pending_empty_subtask_commit: null,
+        pending_fix_commit: null,
+        pending_task_commit: null,
         manual_test_followups: [],
         version: 1,
         updated_at: now,
         last_transition: {
             event: "initialize",
-            from_state: "refine",
-            to_state: "refine",
+            from_state: initialState,
+            to_state: initialState,
             from_active_task_id: rootTaskId,
             to_active_task_id: rootTaskId,
             at: now,
@@ -1598,11 +1724,26 @@ function createInitialWorkflow(rootTaskId: string, rootTitle: string, sessionLea
     };
 }
 
+function migrateWorkflowData(parsed: Record<string, unknown>): Record<string, unknown> | {error: string} {
+    const schemaVersion = parsed.schema_version;
+    if (schemaVersion === 1) {
+        return {
+            ...parsed,
+            schema_version: WORKFLOW_SCHEMA_VERSION,
+            workflow_kind: "task",
+        };
+    }
+    if (schemaVersion === WORKFLOW_SCHEMA_VERSION) {
+        return parsed;
+    }
+    return {error: `workflow schema mismatch (expected ${WORKFLOW_SCHEMA_VERSION}, found ${String(schemaVersion)})`};
+}
+
 function loadWorkflow(root: string): {workflow: PersistedWorkflow} | {error: string} {
     const workflowPath = getWorkflowPath(root);
     if (!fs.existsSync(workflowPath)) {
         return {
-            error: `Missing workflow file: ${workflowPath}. Manual cleanup required: create a valid .tasks/workflow.json before running /task.`,
+            error: `Missing workflow file: ${workflowPath}. Manual cleanup required: create a valid .tasks/workflow.json before running the matching /task or /fix command.`,
         };
     }
 
@@ -1630,7 +1771,14 @@ function loadWorkflow(root: string): {workflow: PersistedWorkflow} | {error: str
         };
     }
 
-    const workflow = parsed as PersistedWorkflow;
+    const migrated = migrateWorkflowData(parsed);
+    if ("error" in migrated) {
+        return {
+            error: `Invalid workflow schema/invariants in ${workflowPath}: ${migrated.error}. Manual cleanup required.`,
+        };
+    }
+
+    const workflow = migrated as PersistedWorkflow;
     const validationError = validateWorkflow(workflow);
     if (validationError) {
         return {
@@ -1638,7 +1786,30 @@ function loadWorkflow(root: string): {workflow: PersistedWorkflow} | {error: str
         };
     }
 
+    if (parsed.schema_version === 1) {
+        const saved = saveWorkflowAtomic(root, workflow);
+        if (saved.ok === false) {
+            return {error: `Failed to save migrated workflow: ${saved.error}`};
+        }
+    }
+
     return {workflow};
+}
+
+export function loadWorkflowForTest(root: string): {workflow: PersistedWorkflow} | {error: string} {
+    return loadWorkflow(root);
+}
+
+export function validateWorkflowForTest(workflow: PersistedWorkflow): string | null {
+    return validateWorkflow(workflow);
+}
+
+export function stateAllowsActiveDepthForKind(
+    workflowKind: WorkflowKind,
+    state: MachineWorkflowState,
+    depth: number,
+): boolean {
+    return stateAllowsActiveDepthForKindMachine(workflowKind, state, depth);
 }
 
 function saveWorkflowAtomic(root: string, workflow: PersistedWorkflow): {ok: true} | {ok: false; error: string} {
@@ -1716,7 +1887,7 @@ export function recordManualTestFollowups(params: {
     fromManualTestVersion: number;
 }): ManualTestFollowup[] {
     const next = (params.existing ?? []).map((followup) => ({...followup}));
-    const seen = new Set(next.map((followup) => followup.fingerprint));
+    const seenIssueIds = new Set(next.map((followup) => followup.issue_id));
 
     for (const created of params.createdIssues) {
         const issueId = created.issue_id.trim();
@@ -1725,7 +1896,7 @@ export function recordManualTestFollowups(params: {
             continue;
         }
         const fingerprint = fingerprintManualTestFollowup(title);
-        if (seen.has(fingerprint)) {
+        if (seenIssueIds.has(issueId)) {
             continue;
         }
         next.push({
@@ -1735,7 +1906,7 @@ export function recordManualTestFollowups(params: {
             created_at: params.createdAt,
             from_manual_test_version: params.fromManualTestVersion,
         });
-        seen.add(fingerprint);
+        seenIssueIds.add(issueId);
     }
 
     return next;
@@ -1931,6 +2102,10 @@ async function createChildIssue(
     }
 }
 
+export function issueNeedsClose(state: "OPEN" | "CLOSED"): boolean {
+    return state !== "CLOSED";
+}
+
 async function closeWorkflowIssue(
     pi: ExtensionAPI,
     cwd: string,
@@ -1950,6 +2125,9 @@ async function closeWorkflowIssue(
         const issue = await getIssueByNumber(configResult.config, issueNumber);
         if (!issue) {
             return {ok: false, error: `Issue #${issueNumber} not found`};
+        }
+        if (!issueNeedsClose(issue.state)) {
+            return {ok: true};
         }
         // The status:in-progress label is left in place when closing; GitHub's CLOSED
         // state is treated as the authoritative workflow status.
@@ -1990,15 +2168,15 @@ async function markWorkflowIssueInProgress(
 const TDD_FALSE_MARKER = "<!-- tdd: false -->";
 
 export function formatCreatedChildIssueBody(description: string, tdd: boolean): string {
-    return formatReusedChildIssueBody(description, tdd);
+    return formatReusedChildIssueBody(description, description, tdd);
 }
 
-export function formatReusedChildIssueBody(existingBody: string, tdd: boolean): string {
-    const body = existingBody.trim();
+export function formatReusedChildIssueBody(existingBody: string, description: string, tdd: boolean): string {
+    const bodyWithoutMarker = existingBody.split(TDD_FALSE_MARKER).join("").trim();
+    const firstSection = bodyWithoutMarker.search(/^## /m);
+    const sections = firstSection >= 0 ? bodyWithoutMarker.slice(firstSection).trim() : "";
+    const body = [description.trim(), sections].filter(Boolean).join("\n\n");
     if (tdd) {
-        return body.split(TDD_FALSE_MARKER).join("").trim();
-    }
-    if (body.includes(TDD_FALSE_MARKER)) {
         return body;
     }
     return body ? `${body}\n\n${TDD_FALSE_MARKER}` : TDD_FALSE_MARKER;
@@ -2246,7 +2424,7 @@ async function replayPendingAssistantTransition(
             return {changed: false, workflow};
         }
 
-        if (!canReplayCompleteFromAssistantMessage(workflow.state, latest.text)) {
+        if (!canReplayCompleteFromAssistantMessage(workflow.workflow_kind, workflow.state, latest.text)) {
             return {changed: false, workflow};
         }
 
@@ -2255,10 +2433,7 @@ async function replayPendingAssistantTransition(
     }
 
     if (replayingAfterErrors) {
-        ctx.ui.notify(
-            "The previous /task run reported tool errors, but the agent later produced a completion. Replaying that completion now.",
-            "warning",
-        );
+        ctx.ui.notify(replayAfterErrorsNotice(workflow.workflow_kind), "warning");
     }
 
     if (ENABLE_TRANSITION_DEBUG) {
@@ -2300,6 +2475,7 @@ async function replayPendingAssistantTransition(
     const completionNotice = completionReadyToMergeNotice({
         changed: transition.changed,
         nextState: clearedPending.workflow.state,
+        workflowKind: clearedPending.workflow.workflow_kind,
     });
     if (completionNotice) {
         ctx.ui.notify(completionNotice, "info");
@@ -2322,6 +2498,7 @@ function buildTransitionedWorkflow(
     workflow: PersistedWorkflow,
     params: {
         toState: MachineWorkflowState;
+        manualTestStatus?: ManualTestStatus;
         activeTaskId?: string;
         event: string;
         mutateTree?: (draft: PersistedWorkflow) => void;
@@ -2344,9 +2521,16 @@ function buildTransitionedWorkflow(
     }
 
     draft.state = params.toState;
+    if (draft.workflow_kind === "fix" && params.manualTestStatus) {
+        draft.manual_test_status = params.manualTestStatus;
+    }
     draft.active_task_id = nextActiveTaskId;
     draft.active_path_ids = nextPath;
     draft.pending_empty_subtask_commit = null;
+    if (params.toState === "complete") {
+        if (draft.workflow_kind === "fix") draft.pending_fix_commit = null;
+        else draft.pending_task_commit = null;
+    }
     draft.version = workflow.version + 1;
     draft.updated_at = new Date().toISOString();
     draft.last_transition = {
@@ -2366,16 +2550,13 @@ function buildTransitionedWorkflow(
     return {workflow: draft};
 }
 
-async function ensureReusedChildIssueTddMarker(
+async function reconcileReusedChildIssueBody(
     pi: ExtensionAPI,
     root: string,
     childTaskId: string,
+    description: string,
     tdd: boolean,
 ): Promise<{ok: true} | {error: string}> {
-    if (tdd) {
-        return {ok: true};
-    }
-
     const issueNumber = parseIssueNumberFromTaskId(childTaskId);
     if (!issueNumber) {
         return {error: `Invalid child issue id: ${childTaskId}`};
@@ -2392,7 +2573,7 @@ async function ensureReusedChildIssueTddMarker(
             return {error: `Issue #${issueNumber} not found`};
         }
 
-        const nextBody = formatReusedChildIssueBody(issue.body, tdd);
+        const nextBody = formatReusedChildIssueBody(issue.body, description, tdd);
         if (nextBody !== issue.body) {
             await updateIssueBody(configResult.config, issue.id, nextBody);
         }
@@ -2428,7 +2609,7 @@ async function createOrReuseChildTask(
         return {error: existingDecision.error};
     }
     if ("id" in existingDecision) {
-        const marked = await ensureReusedChildIssueTddMarker(pi, root, existingDecision.id, tdd);
+        const marked = await reconcileReusedChildIssueBody(pi, root, existingDecision.id, description, tdd);
         if ("error" in marked) {
             return {error: marked.error};
         }
@@ -2453,6 +2634,33 @@ async function workingCopyHasChanges(
     }
 
     return {hasChanges: diff.stdout.trim().length > 0};
+}
+
+export function fixCommitPreflightAction(params: {
+    hasChanges: boolean;
+    requestedMessage: string;
+    pendingMessage: string | null;
+    parentMessage: string | null;
+}): "commit" | "already-committed" | "block" {
+    if (params.hasChanges) return "commit";
+    const normalize = (value: string | null) => value?.replace(/\r\n?/g, "\n").trim() ?? null;
+    const requested = normalize(params.requestedMessage);
+    if (
+        requested
+        && normalize(params.pendingMessage) === requested
+        && normalize(params.parentMessage) === requested
+    ) {
+        return "already-committed";
+    }
+    return "block";
+}
+
+export function finalCommitActionForWorkingCopy(
+    workflowKind: WorkflowKind,
+    hasChanges: boolean,
+): "commit" | "describe-parent" | "block" {
+    if (hasChanges) return "commit";
+    return workflowKind === "fix" ? "block" : "describe-parent";
 }
 
 async function runJjCommitWithCleanCheck(
@@ -2483,6 +2691,17 @@ async function runJjCommitWithCleanCheck(
     }
 
     return {ok: true};
+}
+
+async function readJjParentCommitDescription(
+    pi: ExtensionAPI,
+    root: string,
+): Promise<{description: string} | {error: string}> {
+    const result = await pi.exec("jj", ["log", "-r", "@-", "-T", "description", "--no-graph", "--limit", "1"], {cwd: root});
+    if (result.code !== 0) {
+        return {error: `Failed to read parent commit description: ${result.stderr}`};
+    }
+    return {description: result.stdout.trim()};
 }
 
 async function runJjDescribeParentCommit(
@@ -2525,9 +2744,58 @@ function setPendingEmptySubtaskCommit(
     return updated;
 }
 
+async function prepareFinalCommit(
+    pi: ExtensionAPI,
+    root: string,
+    workflow: PersistedWorkflow,
+    effects: MachineWorkflowEffect[],
+): Promise<{workflow: PersistedWorkflow} | {error: string}> {
+    if (workflow.state !== "commit") return {workflow};
+    const commitMessage = runJjCommitMessageFromEffects(effects);
+    if (!commitMessage) return {workflow};
+
+    const diff = await workingCopyHasChanges(pi, root);
+    if ("error" in diff) return {error: diff.error};
+
+    let parentMessage: string | null = null;
+    if (!diff.hasChanges) {
+        const parent = await readJjParentCommitDescription(pi, root);
+        if ("error" in parent) return {error: parent.error};
+        parentMessage = parent.description;
+    }
+
+    const pendingCommit = workflow.workflow_kind === "fix"
+        ? workflow.pending_fix_commit
+        : workflow.pending_task_commit;
+    const action = fixCommitPreflightAction({
+        hasChanges: diff.hasChanges,
+        requestedMessage: commitMessage,
+        pendingMessage: pendingCommit?.commit_message ?? null,
+        parentMessage,
+    });
+    if (action === "block" && workflow.workflow_kind === "fix") {
+        return {error: "Fix working copy has no changes to commit; root issue was not closed."};
+    }
+    if (action === "block" && pendingCommit) {
+        return {error: "Previously successful task commit is no longer the parent; refusing to rewrite an unrelated commit."};
+    }
+    if (action === "already-committed" || !diff.hasChanges || pendingCommit?.commit_message === commitMessage) {
+        return {workflow};
+    }
+
+    const updated = cloneWorkflow(workflow);
+    const marker = {commit_message: commitMessage, started_at: new Date().toISOString()};
+    if (workflow.workflow_kind === "fix") updated.pending_fix_commit = marker;
+    else updated.pending_task_commit = marker;
+    updated.updated_at = new Date().toISOString();
+    const saved = saveWorkflowAtomic(root, updated);
+    if (saved.ok === false) return {error: saved.error};
+    return {workflow: updated};
+}
+
 function notifyTransition(ctx: ExtensionContext, before: PersistedWorkflow, after: PersistedWorkflow): void {
-    const from = `${before.state}/${before.active_task_id}`;
-    const to = `${after.state}/${after.active_task_id}`;
+    const from = `${before.workflow_kind}:${before.state}/${before.active_task_id}`;
+    const to = `${after.workflow_kind}:${after.state}/${after.active_task_id}`;
     const versionInfo = `v${before.version}→v${after.version}`;
     ctx.ui.notify(`workflow transition ${versionInfo}: ${from} -> ${to}`, "info");
 }
@@ -2558,7 +2826,9 @@ function writeTaskStateProjection(ctx: ExtensionContext, workflow: PersistedWork
         const extensions = (state.extensions ?? {}) as Record<string, unknown>;
         const activeNode = findNodeById(workflow, workflow.active_task_id);
         extensions.task = {
+            workflowKind: workflow.workflow_kind,
             workflowState: workflow.state,
+            manualTestStatus: workflow.manual_test_status ?? null,
             rootTaskId: workflow.task_id,
             rootTitle: workflow.title,
             activeTaskId: workflow.active_task_id,
@@ -2587,6 +2857,8 @@ function buildMachineSnapshot(workflow: PersistedWorkflow): MachineWorkflowSnaps
     const sibling = nextSibling(workflow, workflow.active_task_id);
 
     return {
+        workflowKind: workflow.workflow_kind,
+        manualTestStatus: workflow.manual_test_status,
         state: workflow.state,
         rootTaskId: workflow.task_id,
         activeTaskId: workflow.active_task_id,
@@ -2747,6 +3019,14 @@ type InterpretedMachineEffectsResult = {
     createdIssues: Array<{parentTaskId: string; issue_id: string; title: string}>;
 };
 
+type MachineEffectDependencies = {
+    closeWorkflowIssue: typeof closeWorkflowIssue;
+};
+
+const defaultMachineEffectDependencies: MachineEffectDependencies = {
+    closeWorkflowIssue,
+};
+
 /**
  * Imperative shell: execute machine-emitted effects against GitHub/jj.
  */
@@ -2754,11 +3034,66 @@ async function interpretMachineEffects(
     pi: ExtensionAPI,
     ctx: ExtensionContext,
     root: string,
-    workflowState: MachineWorkflowState,
+    workflow: PersistedWorkflow,
     effects: MachineWorkflowEffect[],
+    dependencies: MachineEffectDependencies = defaultMachineEffectDependencies,
 ): Promise<InterpretedMachineEffectsResult | {error: string}> {
     const createdChildrenByParent = new Map<string, TaskNode[]>();
     const createdIssues: Array<{parentTaskId: string; issue_id: string; title: string}> = [];
+
+    let handledFinalCommit = false;
+    if (workflow.state === "commit") {
+        const commitMessage = runJjCommitMessageFromEffects(effects);
+        if (commitMessage) {
+            const preflight = await workingCopyHasChanges(pi, root);
+            if ("error" in preflight) {
+                return {error: preflight.error};
+            }
+            const commitSubject = commitMessage.split("\n")[0]?.trim() || "(empty subject)";
+
+            if (workflow.workflow_kind === "fix") {
+                let parentMessage: string | null = null;
+                if (!preflight.hasChanges) {
+                    const parent = await readJjParentCommitDescription(pi, root);
+                    if ("error" in parent) return {error: parent.error};
+                    parentMessage = parent.description;
+                }
+                const action = fixCommitPreflightAction({
+                    hasChanges: preflight.hasChanges,
+                    requestedMessage: commitMessage,
+                    pendingMessage: workflow.pending_fix_commit?.commit_message ?? null,
+                    parentMessage,
+                });
+                if (action === "block") {
+                    return {error: "Fix working copy has no changes to commit; root issue was not closed."};
+                }
+                if (action === "commit") {
+                    ctx.ui.notify(`workflow effect: running jj commit (${commitSubject})`, "info");
+                    const committed = await runJjCommitWithCleanCheck(pi, root, commitMessage);
+                    if (committed.ok === false) return {error: committed.error};
+                    ctx.ui.notify(`workflow effect: jj commit succeeded (${commitSubject})`, "info");
+                } else {
+                    ctx.ui.notify(`workflow effect: previously successful jj commit detected (${commitSubject})`, "warning");
+                }
+            } else if (!preflight.hasChanges && workflow.pending_task_commit) {
+                ctx.ui.notify(`workflow effect: previously successful jj commit detected (${commitSubject})`, "warning");
+            } else if (!preflight.hasChanges) {
+                ctx.ui.notify(
+                    "workflow effect: final working copy is empty; updating parent commit message instead of creating an empty commit",
+                    "warning",
+                );
+                const described = await runJjDescribeParentCommit(pi, root, commitMessage);
+                if (described.ok === false) return {error: described.error};
+                ctx.ui.notify(`workflow effect: jj desc succeeded (${commitSubject})`, "info");
+            } else {
+                ctx.ui.notify(`workflow effect: running jj commit (${commitSubject})`, "info");
+                const committed = await runJjCommitWithCleanCheck(pi, root, commitMessage);
+                if (committed.ok === false) return {error: committed.error};
+                ctx.ui.notify(`workflow effect: jj commit succeeded (${commitSubject})`, "info");
+            }
+            handledFinalCommit = true;
+        }
+    }
 
     for (const effect of effects) {
         if (effect.type === "CREATE_ISSUE") {
@@ -2796,7 +3131,7 @@ async function interpretMachineEffects(
         }
 
         if (effect.type === "CLOSE_ISSUE") {
-            const closed = await closeWorkflowIssue(pi, root, effect.taskId);
+            const closed = await dependencies.closeWorkflowIssue(pi, root, effect.taskId);
             if (closed.ok === false) {
                 return {error: `Failed to close task ${effect.taskId}: ${closed.error}`};
             }
@@ -2804,27 +3139,10 @@ async function interpretMachineEffects(
         }
 
         if (effect.type === "RUN_JJ_COMMIT") {
-            const commitSubject = effect.message.split("\n")[0]?.trim() || "(empty subject)";
-
-            if (workflowState === "commit") {
-                const hasChanges = await workingCopyHasChanges(pi, root);
-                if ("error" in hasChanges) {
-                    return {error: hasChanges.error};
-                }
-
-                if (!hasChanges.hasChanges) {
-                    ctx.ui.notify(
-                        "workflow effect: final working copy is empty; updating parent commit message instead of creating an empty commit",
-                        "warning",
-                    );
-                    const described = await runJjDescribeParentCommit(pi, root, effect.message);
-                    if (described.ok === false) {
-                        return {error: described.error};
-                    }
-                    ctx.ui.notify(`workflow effect: jj desc succeeded (${commitSubject})`, "info");
-                    continue;
-                }
+            if (handledFinalCommit) {
+                continue;
             }
+            const commitSubject = effect.message.split("\n")[0]?.trim() || "(empty subject)";
 
             ctx.ui.notify(`workflow effect: running jj commit (${commitSubject})`, "info");
             const committed = await runJjCommitWithCleanCheck(pi, root, effect.message);
@@ -2900,6 +3218,7 @@ async function dispatchWorkflowEvent(
     root: string,
     workflow: PersistedWorkflow,
     event: MachineWorkflowEvent,
+    effectDependencies: MachineEffectDependencies = defaultMachineEffectDependencies,
 ): Promise<{changed: boolean; workflow: PersistedWorkflow} | {error: string}> {
     const transitionError = (message: string): {error: string} => ({
         error: `${message}. Manual cleanup required in ${getWorkflowPath(root)}.`,
@@ -2942,16 +3261,23 @@ async function dispatchWorkflowEvent(
         return {changed: false, workflow: guarded.workflow};
     }
 
-    const workflowForTransition = guarded.workflow;
+    let workflowForTransition = guarded.workflow;
     const decisionToApply = guarded.decision;
+
+    const preparedFixCommit = await prepareFinalCommit(pi, root, workflowForTransition, decisionToApply.effects);
+    if ("error" in preparedFixCommit) {
+        return {error: preparedFixCommit.error};
+    }
+    workflowForTransition = preparedFixCommit.workflow;
 
     // 3) Interpret side effects.
     const interpreted = await interpretMachineEffects(
         pi,
         ctx,
         root,
-        workflowForTransition.state,
+        workflowForTransition,
         decisionToApply.effects,
+        effectDependencies,
     );
     if ("error" in interpreted) {
         return {error: interpreted.error};
@@ -2999,6 +3325,7 @@ async function dispatchWorkflowEvent(
     // 4) Persist new workflow state with validated invariants.
     const transitioned = buildTransitionedWorkflow(workflowForTransition, {
         toState: decisionToApply.state,
+        manualTestStatus: decisionToApply.manualTestStatus,
         activeTaskId: resolvedTarget.activeTaskId,
         event: machineEventAuditLabel(machineEvent),
         mutateTree,
@@ -3019,6 +3346,8 @@ async function dispatchWorkflowEvent(
         workflow: transitioned.workflow,
     };
 }
+
+export const dispatchWorkflowEventForTest = dispatchWorkflowEvent;
 
 function clearTaskUi(ctx: ExtensionContext): void {
     if (!ctx.hasUI) return;
@@ -3088,6 +3417,7 @@ async function maybeNotifyPendingTransitionOutsideTaskLoop(
     });
 
     const shouldNotify = pendingCandidate !== null || shouldNotifyPendingTransitionOutsideTaskLoop({
+        workflowKind: workflow.workflow_kind,
         workflowState: workflow.state,
         latestAssistantMessageId: latest?.id ?? null,
         latestAssistantMessageText: latest?.text ?? "",
@@ -3100,7 +3430,7 @@ async function maybeNotifyPendingTransitionOutsideTaskLoop(
     }
 
     ctx.ui.notify(
-        "The agent has requested a transition outside the tool loop, please run /task to continue.",
+        `The agent has requested a transition outside the tool loop, please run /${workflow.workflow_kind} to continue.`,
         "warning",
     );
 }
@@ -3299,13 +3629,23 @@ export default function (pi: ExtensionAPI) {
 
             // Determine workspace type and run appropriate flow
             if (isTaskWorkspace(root)) {
+                const loadedKind = loadWorkflow(root);
+                if ("error" in loadedKind) {
+                    ctx.ui.notify(loadedKind.error, "error");
+                    return;
+                }
+                const commandKind = validateWorkflowCommandKind("task", loadedKind.workflow.workflow_kind);
+                if ("error" in commandKind) {
+                    ctx.ui.notify(commandKind.error, "error");
+                    return;
+                }
                 if (subcommand === "lgtm") {
-                    const forced = await forceLGTM(pi, ctx, root);
+                    const forced = await forceLGTM(pi, ctx, root, "task");
                     if (!forced) {
                         return;
                     }
                 } else if (subcommand === "done") {
-                    const advanced = await markImplementationDone(pi, ctx, root);
+                    const advanced = await markImplementationDone(pi, ctx, root, "task");
                     if (!advanced) {
                         return;
                     }
@@ -3342,8 +3682,55 @@ export default function (pi: ExtensionAPI) {
                     ctx.ui.notify(`Unknown /task subcommand: ${subcommand}. Supported: delete`, "error");
                     return;
                 }
-                await runMainWorkspace(pi, ctx, root);
+                await runMainWorkspace(pi, ctx, root, "task");
             }
+        },
+    });
+
+    pi.registerCommand("fix", {
+        description: "Run the streamlined fix workflow",
+        handler: async (args, ctx) => {
+            const subcommand = (args ?? "").trim().split(/\s+/).filter(Boolean)[0]?.toLowerCase() ?? "";
+            for (const cmd of ["jj", "git"]) {
+                const result = await pi.exec("which", [cmd]);
+                if (result.code !== 0) {
+                    ctx.ui.notify(`Missing required command: ${cmd}`, "error");
+                    return;
+                }
+            }
+            const jjRootResult = await pi.exec("jj", ["root"]);
+            if (jjRootResult.code !== 0) {
+                ctx.ui.notify("Not in a jj workspace (jj root failed)", "error");
+                return;
+            }
+            const root = jjRootResult.stdout.trim();
+            if (isTaskWorkspace(root)) {
+                const loaded = loadWorkflow(root);
+                if ("error" in loaded) {
+                    ctx.ui.notify(loaded.error, "error");
+                    return;
+                }
+                const commandKind = validateWorkflowCommandKind("fix", loaded.workflow.workflow_kind);
+                if ("error" in commandKind) {
+                    ctx.ui.notify(commandKind.error, "error");
+                    return;
+                }
+                if (subcommand === "lgtm") {
+                    if (!await forceLGTM(pi, ctx, root, "fix")) return;
+                } else if (subcommand === "done") {
+                    if (!await markImplementationDone(pi, ctx, root, "fix")) return;
+                } else if (subcommand) {
+                    ctx.ui.notify(`Unknown /fix subcommand: ${subcommand}. Supported: lgtm, done`, "error");
+                    return;
+                }
+                await withTaskLoopGuard(() => runTaskWorkspace(pi, ctx, root));
+                return;
+            }
+            if (subcommand) {
+                ctx.ui.notify(`Unknown /fix subcommand: ${subcommand}. /fix has no apply or delete subcommand.`, "error");
+                return;
+            }
+            await runMainWorkspace(pi, ctx, root, "fix");
         },
     });
 }
@@ -3389,9 +3776,10 @@ async function forceLGTM(
     pi: ExtensionAPI,
     ctx: ExtensionCommandContext,
     root: string,
+    commandKind: WorkflowKind,
 ): Promise<boolean> {
     if (!isTaskWorkspace(root)) {
-        ctx.ui.notify("/task lgtm is only supported in a task workspace.", "error");
+        ctx.ui.notify(`/${commandKind} lgtm is only supported in a workflow workspace.`, "error");
         return false;
     }
 
@@ -3416,7 +3804,7 @@ async function forceLGTM(
         return false;
     }
 
-    ctx.ui.notify(`/task lgtm applied in ${workflow.state}.`, "info");
+    ctx.ui.notify(`/${commandKind} lgtm applied in ${workflow.state}.`, "info");
     return true;
 }
 
@@ -3424,9 +3812,10 @@ async function markImplementationDone(
     pi: ExtensionAPI,
     ctx: ExtensionCommandContext,
     root: string,
+    commandKind: WorkflowKind,
 ): Promise<boolean> {
     if (!isTaskWorkspace(root)) {
-        ctx.ui.notify("/task done is only supported in a task workspace.", "error");
+        ctx.ui.notify(`/${commandKind} done is only supported in a workflow workspace.`, "error");
         return false;
     }
 
@@ -3463,7 +3852,7 @@ async function markImplementationDone(
         return false;
     }
 
-    ctx.ui.notify(`/task done applied in ${workflow.state}.`, "info");
+    ctx.ui.notify(`/${commandKind} done applied in ${workflow.state}.`, "info");
     return true;
 }
 
@@ -3647,7 +4036,8 @@ function extractMessageText(content: unknown): string {
 async function runMainWorkspace(
     pi: ExtensionAPI,
     ctx: ExtensionCommandContext,
-    root: string
+    root: string,
+    workflowKind: WorkflowKind,
 ): Promise<void> {
     clearTaskUi(ctx);
 
@@ -3657,7 +4047,7 @@ async function runMainWorkspace(
     }
 
     // Select and start a new task
-    await selectAndStartTask(pi, ctx, root);
+    await selectAndStartTask(pi, ctx, root, workflowKind);
 }
 
 async function deleteTaskWorkspaceFromMain(
@@ -3802,7 +4192,7 @@ async function runTaskWorkspace(
         writeTaskStateProjection(ctx, workflow);
 
         if (workflow.state === "complete") {
-            ctx.ui.notify("Workflow already complete. Workspace is ready to merge.", "info");
+            ctx.ui.notify(`${workflow.workflow_kind === "fix" ? "Fix" : "Task"} workflow already complete. Workspace is ready to merge.`, "info");
             return;
         }
 
@@ -3816,7 +4206,7 @@ async function runTaskWorkspace(
             continue;
         }
 
-        const taskLoad = loadTaskPrompt(workflow.state, root, agentDir);
+        const taskLoad = loadWorkflowPrompt(workflow.workflow_kind, workflow.state, root, agentDir);
         if ("error" in taskLoad) {
             ctx.ui.notify(`${taskLoad.error}\nSearched:\n${taskLoad.searched.join("\n")}`, "error");
             return;
@@ -3873,8 +4263,10 @@ async function runTaskWorkspace(
         }
 
         const header = buildTaskIssueHandlingHeader({
+            workflowKind: workflow.workflow_kind,
             workflowVersion: workflow.version,
             workflowState: workflow.state,
+            manualTestStatus: workflow.manual_test_status,
             activeIssueId: workflow.active_task_id,
             activePathIds: workflow.active_path_ids,
         });
@@ -3920,7 +4312,7 @@ async function runTaskWorkspace(
         await waitForNewAssistantMessage(ctx, previousAssistantId);
 
         if (agentEndLooksLikeErrorFromSession(ctx)) {
-            ctx.ui.notify("Agent turn ended with an error; fix the issue and run /task to resume.", "warning");
+            ctx.ui.notify(`Agent turn ended with an error; fix the issue and run /${workflow.workflow_kind} to resume.`, "warning");
             return;
         }
 
@@ -3963,6 +4355,7 @@ async function runTaskWorkspace(
         const completionNotice = completionReadyToMergeNotice({
             changed: transition.changed,
             nextState: clearedPending.workflow.state,
+            workflowKind: clearedPending.workflow.workflow_kind,
         });
         if (completionNotice) {
             ctx.ui.notify(completionNotice, "info");
@@ -3979,7 +4372,7 @@ async function runTaskWorkspace(
 
         if (!shouldContinue) {
             if (clearedPending.workflow.state === "manual-test") {
-                ctx.ui.notify("Manual verification is still in progress. When it is complete, have the agent emit <transition>commit</transition> and then run /task again.", "info");
+                ctx.ui.notify(`Manual verification is still in progress. When it is complete, have the agent emit <transition>commit</transition> and then run /${workflow.workflow_kind} again.`, "info");
             }
             return;
         }
@@ -4613,7 +5006,8 @@ async function deleteTaskWorkspace(
 async function selectAndStartTask(
     pi: ExtensionAPI,
     ctx: ExtensionCommandContext,
-    root: string
+    root: string,
+    workflowKind: WorkflowKind,
 ): Promise<void> {
     const readyIssues = await listReadyIssues(pi, ctx, root);
     if (!readyIssues) {
@@ -4646,7 +5040,7 @@ async function selectAndStartTask(
     const readyLines = selectableIssues.map((issue) => formatReadyIssueLine(issue));
 
     // Let user select a task
-    const selection = await ctx.ui.select("Select a task to start:", readyLines);
+    const selection = await ctx.ui.select(`Select a ${workflowKind} to start:`, readyLines);
     if (!selection) {
         return;
     }
@@ -4664,7 +5058,7 @@ async function selectAndStartTask(
 
     // Create slug from title
     const slugDefault = slugify(issueTitle);
-    const slugInput = await ctx.ui.editor("Task slug:", slugDefault);
+    const slugInput = await ctx.ui.editor(`${workflowKind === "fix" ? "Fix" : "Task"} slug:`, slugDefault);
     const slugResult = resolveEditorDialogValue(slugInput, slugDefault, {singleLine: true});
     if (slugResult.cancelled) {
         ctx.ui.notify("Task start cancelled.", "info");
@@ -4740,6 +5134,7 @@ async function selectAndStartTask(
     }
 
     const initialWorkflow = createInitialWorkflow(
+        workflowKind,
         issueId,
         issueTitle,
         UNBOUND_SESSION_LEAF_ID,
@@ -4752,7 +5147,7 @@ async function selectAndStartTask(
     ctx.ui.notify(`Initialized workflow file: ${getWorkflowPath(wsPath)}`, "info");
 
     // Display success message
-    ctx.ui.notify(`Task workspace created: ${wsPath}`, "info");
+    ctx.ui.notify(`${workflowKind === "fix" ? "Fix" : "Task"} workspace created: ${wsPath}`, "info");
 
     const launchMode = detectTaskWorkspaceLaunchMode(process.env);
     if (launchMode === "tmux") {
@@ -4864,16 +5259,18 @@ interface TaskLoadError {
     searched: string[];
 }
 
-function taskPromptLocations(
+function workflowPromptLocations(
+    workflowKind: WorkflowKind,
     filename: string,
     cwd: string,
     agentDir: string,
     extensionModuleUrl = import.meta.url,
 ) {
+    const extensionPromptPath = workflowKind === "fix" ? `./prompts/fix/${filename}` : `./prompts/${filename}`;
     return [
-        {path: path.join(cwd, ".pi", "task", filename), source: "project" as const},
-        {path: path.join(agentDir, "task", filename), source: "user" as const},
-        {path: fileURLToPath(new URL(`./prompts/${filename}`, extensionModuleUrl)), source: "extension" as const},
+        {path: path.join(cwd, ".pi", workflowKind, filename), source: "project" as const},
+        {path: path.join(agentDir, workflowKind, filename), source: "user" as const},
+        {path: fileURLToPath(new URL(extensionPromptPath, extensionModuleUrl)), source: "extension" as const},
     ];
 }
 
@@ -4881,14 +5278,15 @@ function joinTaskPromptChunks(chunks: string[]): string {
     return chunks.map((chunk) => chunk.trimEnd()).join("\n\n");
 }
 
-export function loadTaskPrompt(
+export function loadWorkflowPrompt(
+    workflowKind: WorkflowKind,
     name: string,
     cwd: string,
     agentDir: string,
     extensionModuleUrl = import.meta.url,
 ): TaskLoadResult | TaskLoadError {
     const filename = name.endsWith(".md") ? name : `${name}.md`;
-    const locations = taskPromptLocations(filename, cwd, agentDir, extensionModuleUrl);
+    const locations = workflowPromptLocations(workflowKind, filename, cwd, agentDir, extensionModuleUrl);
     const searched: string[] = [];
 
     for (const loc of locations) {
@@ -4907,7 +5305,7 @@ export function loadTaskPrompt(
         const appendFilename = filename.replace(/\.md$/, "-append.md");
         const appendContents: string[] = [];
 
-        for (const appendLoc of taskPromptLocations(appendFilename, cwd, agentDir, extensionModuleUrl)) {
+        for (const appendLoc of workflowPromptLocations(workflowKind, appendFilename, cwd, agentDir, extensionModuleUrl)) {
             searched.push(appendLoc.path);
             if (!fs.existsSync(appendLoc.path)) {
                 continue;
@@ -4927,5 +5325,14 @@ export function loadTaskPrompt(
         };
     }
 
-    return {error: `Task "${name}" not found`, searched};
+    return {error: `${workflowKind === "fix" ? "Fix" : "Task"} "${name}" not found`, searched};
+}
+
+export function loadTaskPrompt(
+    name: string,
+    cwd: string,
+    agentDir: string,
+    extensionModuleUrl = import.meta.url,
+): TaskLoadResult | TaskLoadError {
+    return loadWorkflowPrompt("task", name, cwd, agentDir, extensionModuleUrl);
 }

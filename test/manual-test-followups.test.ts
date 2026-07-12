@@ -15,7 +15,7 @@ test("fingerprintManualTestFollowup normalizes title text", () => {
     );
 });
 
-test("recordManualTestFollowups appends created manual-test issues without duplicating fingerprints", () => {
+test("recordManualTestFollowups appends created manual-test issues without duplicating issue IDs", () => {
     const existing: ManualTestFollowup[] = [
         {
             issue_id: "239",
@@ -52,6 +52,33 @@ test("recordManualTestFollowups appends created manual-test issues without dupli
             from_manual_test_version: 66,
         },
     ]);
+});
+
+test("recordManualTestFollowups preserves a new issue when a closed followup repeats its title", () => {
+    const title = "Fix `/title` dispatch blocked by automatic typing acknowledgement";
+    const recorded = recordManualTestFollowups({
+        existing: [
+            {
+                issue_id: "239",
+                title,
+                fingerprint: fingerprintManualTestFollowup(title),
+                created_at: "2026-04-26T11:25:44.000Z",
+                from_manual_test_version: 64,
+            },
+        ],
+        createdAt: "2026-04-26T11:30:40.000Z",
+        fromManualTestVersion: 66,
+        createdIssues: [{issue_id: "242", title}],
+    });
+
+    assert.deepEqual(recorded.map((followup) => followup.issue_id), ["239", "242"]);
+
+    const context = buildManualTestFollowupPromptContext([
+        {...recorded[0], status: "closed"},
+        {...recorded[1], status: "open"},
+    ]);
+    assert.match(context, /#239 CLOSED:/);
+    assert.match(context, /#242 OPEN:/);
 });
 
 test("buildManualTestFollowupPromptContext tells manual-test that closed followups are historical", () => {

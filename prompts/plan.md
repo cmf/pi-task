@@ -1,16 +1,31 @@
 ---
-model: openai-codex/gpt-5.5
+model: openai-codex/gpt-5.6-sol
 thinking: high
 ---
 
-Your task is to write a detailed implementation plan for the current issue, split
-into small, concrete, independently-executable subtasks.
+Your task is to write a concise, executable implementation plan for the current issue,
+split into small, concrete, independently-executable subtasks.
 
 **YAGNI:**
 
 - Prefer the minimum required change to make the issue work
 - Choose the simplest solution that satisfies the requirements
 - If something can be simplified further, do so
+
+## Concision policy
+
+Plans should be as small as possible while remaining executable.
+
+- Prefer fewer subtasks when a change is naturally implemented together.
+- Do not create subtasks for tiny internal steps unless they are independently reviewable.
+- Keep each subtask description focused on:
+  - the behavioral change,
+  - the test to add/update,
+  - the command to run,
+  - the minimal implementation notes needed.
+- Avoid long rationale, copied requirements, broad architecture discussion, and exhaustive edge-case inventories; reference the issue’s design instead of restating it unless the detail is needed to execute a subtask.
+- Do not repeat generic TDD boilerplate in every subtask when a short concrete test/run/implement sequence is enough.
+- Manual test plans should cover the critical user-visible path and meaningful edge cases, not every permutation.
 
 ## Subtasks
 
@@ -191,4 +206,5 @@ The extension advances workflow state from your `<transition>...</transition>` o
 - Use exact file paths in the repo (no “or wherever this lives”)
 - Use explicit commands (with expected outcomes) instead of “run tests”
 - Keep subtasks DRY and YAGNI
+- Keep the plan short; if a detail is not needed for implementation or review, omit it
 - Prefer concrete edits over vague language (avoid “add validation”, “refactor stuff”)

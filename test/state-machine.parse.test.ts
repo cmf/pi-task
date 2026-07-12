@@ -48,6 +48,18 @@ test("parseAssistantOutput picks the last valid transition tag", () => {
     assert.equal(parsed.requestedState, "review-plan");
 });
 
+test("parseAssistantOutput clearly rejects an unknown final transition", () => {
+    const error = expectError(parseAssistantOutput(
+        "<transition>implement-fix-review</transition>",
+        "review",
+    ));
+
+    assert.equal(
+        error,
+        "Unknown workflow transition 'implement-fix-review'. Expected a valid workflow state in <transition>...</transition>.",
+    );
+});
+
 test("parseAssistantOutput parses review findings YAML in review state", () => {
     const parsed = expectParsed(parseAssistantOutput(`
 <review-findings>
@@ -316,4 +328,26 @@ test("canReplayCompleteFromAssistantMessage allows commit-message based states",
         ),
         true,
     );
+});
+
+test("fix replay detection accepts review commit and manual-test transitions", () => {
+    assert.equal(canReplayCompleteFromAssistantMessage("fix", "review", "<transition>commit</transition>"), true);
+    assert.equal(canReplayCompleteFromAssistantMessage("fix", "review", "<transition>manual-test</transition>"), true);
+});
+
+test("fix replay detection requires review findings", () => {
+    assert.equal(canReplayCompleteFromAssistantMessage("fix", "review", "<transition>implement-review</transition>"), false);
+    assert.equal(canReplayCompleteFromAssistantMessage(
+        "fix",
+        "review",
+        "<review-findings>\n- title: Fix regression\n</review-findings>\n<transition>implement-review</transition>",
+    ), true);
+});
+
+test("fix replay detection accepts manual-test follow-ups", () => {
+    assert.equal(canReplayCompleteFromAssistantMessage(
+        "fix",
+        "manual-test",
+        "<manual-test-subtasks>\n- title: Fix failed verification\n</manual-test-subtasks>\n<transition>implement-review</transition>",
+    ), true);
 });

@@ -1,11 +1,11 @@
 ---
 name: task-workflow
-description: Manually diagnose, repair or advance a stuck /task workflow by inspecting and editing .tasks/workflow.json in a per-task workspace. Use when a task workspace is wedged due to a stale pending run, wrong workflow state, bad active task/path, or a missed transition and you need to diagnose or recover the workflow safely.
+description: Manually diagnose, repair or advance a stuck /task or /fix workflow by inspecting and editing .tasks/workflow.json in a per-workflow workspace.
 ---
 
 # Task workflow recovery
 
-Use this skill only for the task extension workflow in a per-task workspace.
+Use this skill only for a `/task` or `/fix` extension workflow in a per-workflow workspace.
 
 ## Read first
 
@@ -16,7 +16,7 @@ Before changing anything, read:
 
 ## Goal
 
-Make the smallest safe edit to `.tasks/workflow.json` so `/task` can continue.
+Make the smallest safe edit to `.tasks/workflow.json` so the command matching `workflow_kind` can continue.
 
 Do not do speculative cleanup. Do not rewrite the workflow from scratch.
 
@@ -26,7 +26,7 @@ Do not do speculative cleanup. Do not rewrite the workflow from scratch.
 - Back up the workflow file before editing it.
 - Prefer clearing stale transient fields over changing workflow state.
 - Never invent task IDs. If you add a node to the task tree, use a real existing issue/task ID.
-- Preserve tree depth limits: root -> subtask -> review finding. Max depth is 2.
+- Preserve kind-specific tree depth limits: task root -> subtask -> review finding (max 2); fix root -> follow-up (max 1).
 - Keep `active_path_ids` exactly equal to the root-to-active path.
 - If a transition normally has side effects (create issues, close issues, `jj commit`), do not skip those side effects unless they already happened and the workflow file is just behind.
 
@@ -47,11 +47,14 @@ Check these first:
    `refine`, `plan`, `review-plan`, `implement`, `review`, `implement-review`, `subtask-commit`, `manual-test`, `commit`, `complete`
 3. Does `active_task_id` exist in the tree?
 4. Does `active_path_ids` match the actual path to `active_task_id`?
-5. Is active depth compatible with state?
-6. Is `pending_prompt_run` stale?
-7. Is `session_leaf_id` stale because the workflow moved to a new Pi session?
+5. Is active depth compatible with `workflow_kind` and state?
+6. For fix workflows, is `manual_test_status` present and consistent with the intended verification path?
+7. Is `pending_prompt_run` stale?
+8. Is `session_leaf_id` stale because the workflow moved to a new Pi session?
 
 ## State/depth map
+
+Task workflow:
 
 - Depth 0 only:
   - `refine`
@@ -66,6 +69,12 @@ Check these first:
   - `subtask-commit`
 - Depth 2 only:
   - `implement-review`
+
+Fix workflow:
+
+- Depth 0 only: `implement`, `review`, `manual-test`, `commit`, `complete`
+- Depth 1 only: `implement-review`
+- Invalid in fix: `refine`, `plan`, `review-plan`, `subtask-commit`
 
 Depth is `active_path_ids.length - 1`.
 
@@ -96,9 +105,9 @@ Fix by editing only:
 
 Examples:
 
-- `implement`/`review`/`subtask-commit` must point at a root child
-- `implement-review` must point at a review-finding child
-- root states must point back to the root task
+- In a task workflow, `implement`/`review`/`subtask-commit` must point at a root child, and `implement-review` must point at a depth-2 review-finding child.
+- In a fix workflow, `implement-review` must point at a depth-1 follow-up child; all other valid fix states point at the root.
+- Root states must point back to the root task.
 
 ### 3) Stale `session_leaf_id`
 
@@ -112,12 +121,11 @@ If the assistant clearly reached the next state but the file did not advance, yo
 
 Examples that are usually safe if the required artifacts already exist:
 
-- `refine -> plan`
-- `plan -> review-plan`
-- `implement -> review`
-- `manual-test -> commit`
+- For a task workflow: `refine -> plan`, `plan -> review-plan`, `implement -> review`, or `manual-test -> commit`.
+- For a fix workflow, `implement -> review` is safe at the root.
+- For a fix workflow, `manual-test -> commit` must also set `manual_test_status` to `passed`.
 
-Note: `manual-test -> implement` is only safe if the required depth-1 subtasks already exist under the root.
+For a task workflow, `manual-test -> implement` is only safe if the required depth-1 subtasks already exist under the root. A fix workflow does not use this transition; use `manual-test -> implement-review` with existing depth-1 follow-up children and keep `manual_test_status` as `pending`.
 
 When you do this, update:
 
@@ -134,15 +142,12 @@ Only do these if the tree already contains the correct child tasks, or you can a
 - `review-plan -> implement`
   - needs depth-1 subtask nodes under the root
   - active task should usually become the first subtask
-- `review -> implement-review`
-  - needs depth-2 finding nodes under the active subtask
-  - active task should usually become the first finding
-- within `implement-review`
-  - if another sibling finding exists, stay in `implement-review` and move to that sibling
-  - otherwise return to the parent subtask in `review`
-- `manual-test -> implement`
-  - needs depth-1 subtask nodes under the root
-  - active task should usually become the first subtask
+- For a task workflow, `review -> implement-review` needs depth-2 finding nodes under the active subtask; activate the first finding.
+- For a fix workflow, `review -> implement-review` needs a depth-1 follow-up under the root; activate the first follow-up.
+- Within task `implement-review`, move to the next sibling finding or return to the parent subtask in `review`.
+- Within fix `implement-review`, move to the next sibling follow-up or return to the root in `review`, preserving `manual_test_status`.
+- For a task workflow, `manual-test -> implement` needs depth-1 subtask nodes under the root; activate the first subtask.
+- For a fix workflow, `manual-test -> implement-review` needs a depth-1 follow-up under the root; activate the first follow-up and keep `manual_test_status` as `pending`.
 
 If the needed child nodes do not exist yet, do not fabricate them.
 
@@ -158,6 +163,7 @@ If `pending_empty_subtask_commit` is present but the workflow should continue no
 - `session_leaf_id` sometimes
 - `pending_prompt_run`
 - `pending_empty_subtask_commit`
+- fix-only `manual_test_status` when repairing manual-test transitions
 - `version` when applying an actual transition
 - `updated_at`
 
@@ -183,7 +189,7 @@ If `pending_empty_subtask_commit` is present but the workflow should continue no
    - path matches
    - state/depth is valid
 8. Tell the user exactly what changed.
-9. Tell the user to run `/task` again.
+9. Tell the user to run `/task` or `/fix` according to `workflow_kind`.
 
 ## Output style
 

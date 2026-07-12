@@ -186,7 +186,7 @@ async function graphql<T>(
     variables?: Record<string, unknown>
 ): Promise<T> {
     const isMutation = /\bmutation\b/i.test(query);
-    const maxAttempts = isMutation ? 2 : 3;
+    const maxAttempts = isMutation ? 1 : 3;
     let lastError: GitHubGraphQLError | null = null;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {

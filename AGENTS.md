@@ -2,15 +2,17 @@
 
 ## Task extension (`index.ts`)
 
-The **task** extension provides a deterministic, GitHub-Issues-driven workflow on top of
-GitHub sub-issues and `jj` workspaces, with an explicit local state machine.
+The extension provides deterministic **task** and **fix** workflows on top of GitHub sub-issues and `jj` workspaces, with an explicit local state machine.
 
-- Command: `/task`
+- Commands: `/task` and `/fix`
 - Main-workspace cleanup: `/task delete` lets you select and remove a per-task workspace (`jj workspace forget` + delete workspace directory).
 - Escape hatch: `/task lgtm` (task workspace only) to force-approve `review-plan` or `review`.
 - Recovery command: `/task done` (task workspace only) manually completes an implementation-style state (`implement` or `implement-review`) when automatic advancement was missed.
-- Source of truth: **`.tasks/workflow.json`** in the task workspace.
-- Prompt selection: loads `prompts/<workflow.state>.md` (or project override at `.pi/task/<state>.md`, then user override at `~/.pi/agent/task/<state>.md`).
+- `/fix lgtm` force-approves fix review while respecting the manual-test latch.
+- `/fix done` manually completes fix `implement` or `implement-review`.
+- Source of truth: **`.tasks/workflow.json`** in the workflow workspace.
+- Task prompts: `.pi/task/<state>.md`, `~/.pi/agent/task/<state>.md`, then `prompts/<state>.md`.
+- Fix prompts: `.pi/fix/<state>.md`, `~/.pi/agent/fix/<state>.md`, then `prompts/fix/<state>.md`.
 
 ### Local workflow file
 
@@ -21,7 +23,9 @@ Per-task workspaces must contain:
 This file is the canonical workflow store and includes:
 
 - task tree (`task_id`, `title`, `subtasks`)
-- `schema_version`
+- `schema_version` (currently 2; schema 1 migrates to task kind)
+- `workflow_kind` (`task` or `fix`)
+- fix-only `manual_test_status` (`undecided`, `pending`, or `passed`)
 - `state`
 - `active_task_id`
 - `active_path_ids`
@@ -67,6 +71,8 @@ The extension treats your repo in two modes:
 
 `implement-plan` is not persisted; it is no longer a canonical state.
 
+Fix workflows only allow root `implement`, `review`, `manual-test`, `commit`, `complete`, plus depth-1 `implement-review`. They do not allow `refine`, `plan`, `review-plan`, or `subtask-commit`.
+
 ### Transition contract
 
 - `refine -> plan` via assistant output: `<transition>plan</transition>`
@@ -93,13 +99,25 @@ The extension treats your repo in two modes:
   - close root task + final `jj commit`
   - optionally move to `complete`
 
+Fix transition contract:
+
+- `implement -> review` deterministically or via `/fix done`.
+- `review -> implement-review` with non-empty `<review-findings>`; children are created under root.
+- `implement-review` closes each child, advances siblings, then returns to root `review`.
+- `review -> manual-test` sets `manual_test_status: pending`.
+- `review -> commit` is allowed only while manual testing is `undecided`.
+- `manual-test -> implement-review` with confirmed `<manual-test-subtasks>` keeps testing pending.
+- Pending manual testing forces successful review back to `manual-test`.
+- `manual-test -> commit` sets testing to `passed`.
+- `commit -> complete` requires a non-empty working copy, performs one fix commit, then closes root.
+
 ### Invariants enforced
 
 - `active_task_id` exists in workflow tree
 - `active_path_ids` exactly matches root → active path
 - unique task IDs across tree
-- max tree depth = 2 (root, subtask, review finding)
-- state/depth compatibility is enforced
+- task max tree depth = 2; fix max tree depth = 1
+- state/depth compatibility is workflow-kind aware
 - `version` increments exactly once per successful transition
 
 ### Merging
