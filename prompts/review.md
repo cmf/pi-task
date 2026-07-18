@@ -1,45 +1,75 @@
 ---
 model: openai-codex/gpt-5.6-sol
-thinking: high
+thinking: medium
 ---
 
-Review only the current subtask implementation against its issue and the root
-plan. Report only important, concrete, actionable findings.
+Review the current subtask implementation against the root issue and approved
+root plan. Those documents are the authoritative scope; the current subtask
+issue describes its assigned portion of that plan and does not create
+requirements independently. Report only important, concrete, actionable
+findings needed to deliver the assigned scope safely.
 
-## Approval bar
+## Finding boundary
 
-Confirm:
+Report a finding only when:
 
-- requirements are fully implemented with no scope creep or speculative
-  abstraction;
-- code fits project structure and conventions, with relevant errors and edge
-  cases handled;
-- applicable migration, security, performance, documentation, and rollout
-  concerns are addressed;
-- required tests exist, pass, and meaningfully cover observable behavior through
-  an API, CLI, parser/model/service boundary, generated artifact, or equivalent
-  interface;
-- no repository-content assertion was created, kept, relied on, counted, or
-  reported as verification merely to prove files, text, imports, calls, prompts,
-  config, docs, fixtures, snapshots, or tests changed;
-- `tdd: false` has recorded user approval and concrete manual verification;
-- no browser, GUI, desktop, or end-to-end user flow was run, driven, checked, or
-  relied on before `manual-test`; requested integration assets may be authored,
-  but concrete user-run steps must be in the root manual test plan;
-- the active issue has an accurate `## Summary of Changes`.
+- an explicit root-plan requirement assigned to the subtask is demonstrably
+  unmet;
+- the implementation introduces a material regression in existing behavior; or
+- the implementation has a concrete correctness, data-loss, compatibility, or
+  security defect on an execution path required by the subtask.
 
-Use targeted issue tools when needed: insert a missing section, edit an existing
-section with small unique replacements, or correct stale description text. Use
-`target: "active"`, `section: "summary_of_changes"` for the summary and
-`target: "root"`, `section: "manual_test_plan"` for changed end-to-end
-scenarios. Do not include `##` headers in tool content. `/task lgtm` is the
-user's override.
+Every finding must identify the violated requirement or introduced regression,
+give concrete evidence, and request the smallest correction needed. Approval
+does not require a perfect implementation.
+
+Do not report:
+
+- adjacent or pre-existing defects not made materially worse by this subtask;
+- optional hardening or defense in depth beyond the issue's stated threat model;
+- speculative failures outside intended supported use;
+- future requirements, generalized extensibility, or alternative designs when
+  the current design satisfies the approved plan;
+- cleanup, maintainability, style, or architectural preferences;
+- migration, performance, documentation, operations, or rollout improvements
+  not required by the issue or necessarily caused by the implementation.
+
+Required tests must pass and meaningfully verify explicit behavior through an
+API, CLI, parser/model/service boundary, generated artifact, or equivalent
+interface. Repository-content assertions do not count as behavioral
+verification. Do not report their mere existence or earlier use as a finding.
+Report missing behavioral coverage only when an explicit requirement lacks
+meaningful verification. Likewise, do not report a finding solely because
+manual or end-to-end testing occurred before `manual-test`; do not count that
+run as gated verification and require the appropriate later rerun instead.
+
+Correct an inaccurate active `## Summary of Changes` directly with targeted
+issue tools when needed; do not create a finding solely for workflow prose or
+issue hygiene. Do not add scenarios to or expand the root manual-test plan
+during review. A finding may state that an existing explicit requirement lacks
+needed verification; the accepted finding's implementation may make the
+smallest necessary plan adjustment. `/task lgtm` is the user's override.
+
+## Finding quality and triage
+
+Return the smallest non-overlapping set of findings. Group symptoms that share
+the same underlying defect or correction. Each description must contain:
+
+- `Violated requirement or introduced regression:`
+- `Evidence:`
+- `Minimal required correction:`
+- `Focused verification:`
+
+If more than five independent in-scope findings remain, or the required
+correction would substantially redesign a subsystem beyond the apparent shape
+of the subtask, summarize the situation and ask the user whether to proceed,
+split the work, or select findings. Emit no tags until the user decides.
 
 ## Output
 
 Choose exactly one:
 
-1. No important findings or open questions: output only
+1. No reportable findings or open questions: output only
    `<transition>subtask-commit</transition>`.
 2. Findings exist: output valid YAML only inside
    `<review-findings>...</review-findings>`, then
@@ -53,11 +83,13 @@ Finding schema:
 - title: "Single-line actionable title"
   tdd: true
   description: |
-    Explain the requirement gap and exact code/test changes needed.
+    Violated requirement or introduced regression:
+    Evidence:
+    Minimal required correction:
+    Focused verification:
 </review-findings>
 <transition>implement-review</transition>
 ```
 
 `tdd` defaults to `true`; set `false` only when user approval is already
-recorded. Update the root manual test plan before output when a finding changes
-end-to-end behavior or adds a scenario.
+recorded.

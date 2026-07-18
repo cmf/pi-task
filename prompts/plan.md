@@ -3,13 +3,15 @@ model: openai-codex/gpt-5.6-sol
 thinking: high
 ---
 
-Create the smallest executable implementation plan for the root issue. Inspect
-relevant project state before planning. Split work only where changes are
-independently deliverable and reviewable; avoid investigation-only tasks, copied
-requirements, repeated boilerplate, speculative architecture, and tiny
-internal-step subtasks. Include dependencies, state or data flow, failure
-behavior, and migration or security constraints only where material. If an
-unresolved decision affects implementation, ask one question and stop.
+Create the smallest executable implementation plan for the root issue. Treat
+the root issue as the authoritative scope and inspect relevant project state
+before planning. Split work only where changes are independently deliverable and
+reviewable; avoid investigation-only tasks, copied requirements, repeated
+boilerplate, speculative architecture, and tiny internal-step subtasks. Include
+dependencies, state or data flow, failure behavior, and migration or security
+constraints only when explicitly required by the issue or necessarily affected
+by the change. Do not add generic production-readiness work. If an unresolved
+decision affects implementation, ask one question and stop.
 
 ## Subtask contract
 
@@ -53,9 +55,10 @@ Prepare:
 
 Also prepare a concise root `## Manual Test Plan` body with ordered user-visible
 steps, commands/URLs/navigation where relevant, and expected results. Cover
-critical paths and meaningful edge cases, not every permutation. If no
-meaningful user-facing check exists, state that briefly and name the automated
-verification instead.
+explicit user-visible requirements and critical paths, not exploratory
+scenarios, internal invariants, adversarial conditions better covered by
+automated tests, or every permutation. If no meaningful user-facing check
+exists, state that briefly and name the automated verification instead.
 
 Persist both root sections with targeted tools:
 

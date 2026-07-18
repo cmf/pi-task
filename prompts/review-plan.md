@@ -1,40 +1,62 @@
 ---
 model: openai-codex/gpt-5.6-sol
-thinking: high
+thinking: medium
 fast: true
 ---
 
-Review the root implementation plan—not code—for important, concrete, actionable
-production-readiness gaps.
+Review the root implementation plan—not code—against the authoritative root
+issue. Report only important, concrete, actionable plan gaps needed to deliver
+that issue safely.
 
-## Approval bar
+## Finding boundary
 
-Approve only when the plan:
+Report a finding only when the plan:
 
-- covers every requirement with the minimum viable scope and sensible subtask
-  boundaries;
-- gives exact paths, realistic commands, expected outcomes, and explicit
-  dependencies;
-- fits existing architecture and addresses relevant errors, compatibility,
-  migration, security, performance, operations, and documentation concerns;
-- gives `tdd: true` work meaningful observable-behavior tests, never
-  repository-content assertions or user-facing browser/GUI/end-to-end flows;
-- records explicit approval and concrete manual checks for every `tdd: false`
-  item;
-- has a concise, realistic root manual test plan for user-facing flows,
-  including requested integration assets that must not run before `manual-test`.
+- omits or contradicts an explicit root requirement;
+- proposes a change that would introduce a material regression; or
+- cannot safely execute the required work because of a concrete dependency,
+  ordering, correctness, data-loss, compatibility, or security gap on an
+  execution path required by the issue.
 
-Do not add detail unless it is needed for safe execution or review. Flag
-overlong plans only with specific cuts.
+Every finding must identify the affected root requirement, give concrete
+reasoning, and request the smallest plan correction needed.
+
+Do not report:
+
+- optional hardening or defense in depth beyond the issue's stated threat model;
+- speculative failures outside intended supported use;
+- future requirements, generalized extensibility, or alternative designs when
+  the proposed design satisfies the issue;
+- cleanup, maintainability, style, or architectural preferences;
+- migration, performance, documentation, operations, or rollout work not
+  required by the issue or necessarily caused by the plan;
+- requests for more detail that is not needed to implement or review the work
+  safely.
+
+The plan should use the minimum viable scope and sensible independently
+reviewable subtask boundaries. Paths, commands, outcomes, and dependencies
+should be exact where known and necessary; do not require invented specificity.
+`tdd: true` work needs focused observable-behavior tests, never
+repository-content assertions or user-facing browser/GUI/end-to-end flows.
+Every `tdd: false` item needs recorded user approval and minimum concrete manual
+verification.
+
+The root manual-test plan should cover explicit user-visible requirements and
+critical paths. Do not request exploratory scenarios, internal invariants, or
+adversarial conditions better covered by automated tests.
+
+Return the smallest non-overlapping set of findings and group findings that
+share the same underlying omission or plan correction.
 
 ## Normal review
 
-If there are no important findings or missing decisions, output only
+If there are no reportable findings or missing decisions, output only
 `<transition>implement</transition>`.
 
 Otherwise, list findings briefly as `1.`, `2.`, etc. For each, name the exact
-subtask, explain why it matters, and state the precise plan change. Stop without
-editing or transitioning. Tell the user to apply selected findings with
+subtask, identify the violated root requirement, explain the concrete problem,
+and state the smallest precise plan change. Stop without editing or
+transitioning. Tell the user to apply selected findings with
 `/task apply <numbers> [instruction]`, for example `/task apply 1 2` or
 `/task apply 1 do option b`.
 
