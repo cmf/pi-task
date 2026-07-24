@@ -2,7 +2,7 @@
 
 `pi-task` is a Pi extension that turns AI-assisted coding into a deterministic, ticket-driven workflow. It connects GitHub Issues, `jj` workspaces, and Pi's agent loop so that each task gets its own isolated workspace, explicit workflow state, review gates, subtasks, commits, and final squash-merge path.
 
-The core idea is: instead of asking an agent to "go build this", the extension drives it through an explicit lifecycle. `/task` uses refine, plan, plan review, per-subtask implementation/review/commits, manual test, final commit, and merge. `/fix` is a shorter workflow for root issues that are already specific enough to implement directly.
+The core idea is: instead of asking an agent to "go build this", the extension drives it through an explicit lifecycle. `/task` runs both the full task lifecycle and a shorter fix lifecycle for root issues that are already specific enough to implement directly.
 
 It's designed to require my attention only at specific points, so that I can run different tasks asynchronously (including homeschooling etc).
 
@@ -50,7 +50,7 @@ stateDiagram-v2
 
 ## Fix workflow
 
-Use `/fix` when the selected root issue already contains a complete implementation specification and does not need refinement, planning, or plan review. Use `/task` when requirements are still unclear, the work benefits from an explicit reviewed plan, or separate subtask commits are useful.
+Use `/task` for every workflow. When a selected open root issue has an exact, case-insensitive `fix` label, workspace initialization persists `workflow_kind: "fix"` and starts at `implement`; otherwise it persists a normal task workflow at `refine`. Selection lines show the inferred kind. The extension paginates issue labels, refetches the selected issue, and verifies that it is still open and root immediately before initialization. It never creates or changes the user-owned `fix` label, and later label changes do not alter the persisted workflow kind.
 
 ```mermaid
 stateDiagram-v2
@@ -68,10 +68,12 @@ stateDiagram-v2
 
 Commands:
 
-- `/fix`: start or resume a fix workflow.
-- `/fix done`: manually complete `implement` or `implement-review` when automatic advancement was missed.
-- `/fix lgtm`: approve `review`; it moves to `manual-test` when manual testing is pending, otherwise to `commit`.
-- `/fix apply` is intentionally unsupported.
+- `/task`: start or resume either workflow kind.
+- `/task done`: manually complete `implement` or `implement-review` using the persisted kind's behavior.
+- `/task lgtm`: approve the current kind-specific review state; fix workflows respect the manual-test latch.
+- `/task apply`: task-only and valid only in `review-plan`.
+- `/task delete`: available from the main workspace.
+- `/fix` remains a compatibility alias that delegates to `/task`; it does not select workflow kind.
 
 Fix workflows produce one final implementation commit. Review findings and confirmed manual-test failures become root child issues, but are not committed separately. A manual-test latch prevents review from skipping a required rerun after a failed pass. Empty final fix commits are blocked before the root issue is closed.
 

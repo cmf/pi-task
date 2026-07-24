@@ -1,11 +1,11 @@
 ---
 name: task-workflow
-description: Manually diagnose, repair or advance a stuck /task or /fix workflow by inspecting and editing .tasks/workflow.json in a per-workflow workspace.
+description: Manually diagnose, repair or advance a stuck /task workflow by inspecting and editing .tasks/workflow.json in a per-workflow workspace.
 ---
 
 # Task workflow recovery
 
-Use this skill only for a `/task` or `/fix` extension workflow in a per-workflow workspace.
+Use this skill only for a `/task` extension workflow in a per-workflow workspace. The persisted `workflow_kind` may be `task` or `fix`.
 
 ## Read first
 
@@ -16,7 +16,7 @@ Before changing anything, read:
 
 ## Goal
 
-Make the smallest safe edit to `.tasks/workflow.json` so the command matching `workflow_kind` can continue.
+Make the smallest safe edit to `.tasks/workflow.json` so `/task` can continue.
 
 Do not do speculative cleanup. Do not rewrite the workflow from scratch.
 
@@ -189,7 +189,7 @@ If `pending_empty_subtask_commit` is present but the workflow should continue no
    - path matches
    - state/depth is valid
 8. Tell the user exactly what changed.
-9. Tell the user to run `/task` or `/fix` according to `workflow_kind`.
+9. Tell the user to run `/task`.
 
 ## Output style
 

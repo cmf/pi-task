@@ -4,12 +4,11 @@
 
 The extension provides deterministic **task** and **fix** workflows on top of GitHub sub-issues and `jj` workspaces, with an explicit local state machine.
 
-- Commands: `/task` and `/fix`
+- Canonical command: `/task` creates and resumes both task and fix workflows; `/fix` is only a compatibility alias to `/task`.
 - Main-workspace cleanup: `/task delete` lets you select and remove a per-task workspace (`jj workspace forget` + delete workspace directory).
-- Escape hatch: `/task lgtm` (task workspace only) to force-approve `review-plan` or `review`.
-- Recovery command: `/task done` (task workspace only) manually completes an implementation-style state (`implement` or `implement-review`) when automatic advancement was missed.
-- `/fix lgtm` force-approves fix review while respecting the manual-test latch.
-- `/fix done` manually completes fix `implement` or `implement-review`.
+- `/task lgtm` applies the persisted kind's force-approval behavior, including the fix manual-test latch.
+- `/task done` manually completes kind-appropriate `implement` or `implement-review` states when automatic advancement was missed.
+- `/task apply` remains task-only and valid only in `review-plan`.
 - Source of truth: **`.tasks/workflow.json`** in the workflow workspace.
 - Task prompts: `.pi/task/<state>.md`, `~/.pi/agent/task/<state>.md`, then `prompts/<state>.md`.
 - Fix prompts: `.pi/fix/<state>.md`, `~/.pi/agent/fix/<state>.md`, then `prompts/fix/<state>.md`.
@@ -44,9 +43,9 @@ The extension treats your repo in two modes:
 
 - Runs task selection and workspace management.
 - Offers to merge completed per-task workspaces back into main.
-- Chooses an open root GitHub issue, marks it with `status:in-progress`, creates a
-  dedicated `jj workspace` under `~/.workspaces/<task-id>/<repo>`, and initializes
-  `.tasks/workflow.json` in that workspace.
+- Chooses an open root GitHub issue and shows its label-inferred workflow kind.
+- Refetches the selection, verifies it is still open and root, infers fix from exact case-insensitive `fix` label membership, marks it with `status:in-progress`, creates a dedicated `jj workspace` under `~/.workspaces/<task-id>/<repo>`, and initializes `.tasks/workflow.json` in that workspace.
+- Issue labels are paginated for inference. The extension does not mutate the user-owned `fix` label, and persisted `workflow_kind` remains authoritative after initialization.
 - Launches the workflow workspace using the first available environment in this order: a new Herdr workspace, a tmux window, a Ghostty tab, or manual `cd ... && pi` instructions.
 
 **Per-task workspace (`~/.workspaces/<task-id>/<repo>`)**
@@ -101,7 +100,7 @@ Fix workflows only allow root `implement`, `review`, `manual-test`, `commit`, `c
 
 Fix transition contract:
 
-- `implement -> review` deterministically or via `/fix done`.
+- `implement -> review` deterministically or via `/task done`.
 - `review -> implement-review` with non-empty `<review-findings>`; children are created under root.
 - `implement-review` closes each child, advances siblings, then returns to root `review`.
 - `review -> manual-test` sets `manual_test_status: pending`.

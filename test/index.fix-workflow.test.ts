@@ -10,10 +10,13 @@ import {
     finalCommitActionForWorkingCopy,
     fixCommitPreflightAction,
     issueNeedsClose,
+    inferWorkflowKindFromLabels,
+    formatReadyIssueLine,
     loadWorkflowForTest,
     loadWorkflowPrompt,
     stateAllowsActiveDepthForKind,
-    validateWorkflowCommandKind,
+    validateStartableRootIssue,
+    validateTaskApplyWorkflow,
     validateWorkflowForTest,
 } from "../index.js";
 
@@ -221,10 +224,50 @@ test("kind-specific state and active depth validation", () => {
     assert.match(validateWorkflowForTest(invalid) ?? "", /not valid for fix workflow/);
 });
 
-test("task and fix commands reject persisted workflow mismatches", () => {
-    assert.deepEqual(validateWorkflowCommandKind("task", "fix"), {error: "This is a fix workspace. Run /fix."});
-    assert.deepEqual(validateWorkflowCommandKind("fix", "task"), {error: "This is a task workspace. Run /task."});
-    assert.deepEqual(validateWorkflowCommandKind("fix", "fix"), {ok: true});
+test("selected issue refetch must still be open and root before initialization", () => {
+    const base = {number: 12, state: "OPEN" as const, parent: null};
+    assert.deepEqual(validateStartableRootIssue(base), {ok: true});
+    assert.deepEqual(
+        validateStartableRootIssue({...base, state: "CLOSED"}),
+        {error: "Issue #12 is no longer open"},
+    );
+    assert.deepEqual(
+        validateStartableRootIssue({...base, parent: {id: "parent", number: 1, title: "Parent"}}),
+        {error: "Issue #12 is no longer a root issue"},
+    );
+});
+
+test("workflow kind inference uses exact case-insensitive fix label membership", () => {
+    assert.equal(inferWorkflowKindFromLabels(["bug", "FIX"]), "fix");
+    assert.equal(inferWorkflowKindFromLabels(["bugfix", "fixed"]), "task");
+    assert.equal(inferWorkflowKindFromLabels([]), "task");
+});
+
+test("ready issue lines expose the inferred workflow kind", () => {
+    assert.match(formatReadyIssueLine({
+        id: "12",
+        status: "open",
+        title: "Fix parser",
+        created: "2026-07-24T00:00:00Z",
+        parent: null,
+        labels: ["fix"],
+    }), /\[fix\]/);
+    assert.match(formatReadyIssueLine({
+        id: "13",
+        status: "open",
+        title: "Plan feature",
+        created: "2026-07-24T00:00:00Z",
+        parent: null,
+        labels: [],
+    }), /\[task\]/);
+});
+
+test("task apply remains task-only in review-plan", () => {
+    assert.deepEqual(validateTaskApplyWorkflow("task", "review-plan"), {ok: true});
+    assert.deepEqual(
+        validateTaskApplyWorkflow("fix", "review"),
+        {error: "/task apply is only valid in task review-plan; current workflow is fix:review."},
+    );
 });
 
 test("fix prompt lookup uses fix namespace and override precedence", () => {

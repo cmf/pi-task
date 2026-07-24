@@ -346,12 +346,16 @@ test("markdown section and description helpers reject level-2 headers in generat
     assert.equal(insertMarkdownSection("Intro", "## Plan", "### Allowed"), "Intro\n\n## Plan\n### Allowed");
 });
 
-test("default export registers task and fix commands plus the three targeted issue edit tools", () => {
+test("default export registers task canonically, fix as its compatibility alias, and the targeted issue tools", () => {
     const tools: Array<{name: string; description?: string}> = [];
     const commands: string[] = [];
+    const handlers = new Map<string, unknown>();
     const pi = {
         on() {},
-        registerCommand(name: string) { commands.push(name); },
+        registerCommand(name: string, command: {handler: unknown}) {
+            commands.push(name);
+            handlers.set(name, command.handler);
+        },
         registerTool(tool: {name: string; description?: string}) {
             tools.push(tool);
         },
@@ -360,6 +364,7 @@ test("default export registers task and fix commands plus the three targeted iss
     taskExtension(pi as never);
 
     assert.deepEqual(commands, ["task", "fix"]);
+    assert.equal(handlers.get("fix"), handlers.get("task"));
 
     const toolNames = tools.map((tool) => tool.name);
     assert.deepEqual(

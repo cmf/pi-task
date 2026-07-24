@@ -195,9 +195,9 @@ test("findPendingPromptRunCompletionCandidate recovers from tool errors when a t
     });
 });
 
-test("replay warning uses the command for each workflow kind", () => {
+test("replay warning always directs both workflow kinds through task", () => {
     assert.match(replayAfterErrorsNotice("task"), /previous \/task run/);
-    assert.match(replayAfterErrorsNotice("fix"), /previous \/fix run/);
+    assert.match(replayAfterErrorsNotice("fix"), /previous \/task run/);
 });
 
 test("findPendingPromptRunCompletionCandidate still rejects assistant error turns", () => {

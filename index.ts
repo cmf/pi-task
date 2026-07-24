@@ -119,12 +119,8 @@ type TaskIssueBodyEditInput =
     | {tool: "task_issue_edit_section"; section: TaskIssueSection; edits: Edit[]}
     | {tool: "task_issue_edit_description"; edits: Edit[]};
 
-export function validateWorkflowCommandKind(
-    commandKind: WorkflowKind,
-    persistedKind: WorkflowKind,
-): {ok: true} | {error: string} {
-    if (commandKind === persistedKind) return {ok: true};
-    return {error: persistedKind === "fix" ? "This is a fix workspace. Run /fix." : "This is a task workspace. Run /task."};
+export function inferWorkflowKindFromLabels(labels: string[]): WorkflowKind {
+    return labels.some((label) => label.trim().toLowerCase() === "fix") ? "fix" : "task";
 }
 
 export function normalizeSessionFilePath(sessionFile: string | undefined): string | null {
@@ -257,8 +253,8 @@ export function findPendingPromptRunCompletionCandidate(params: {
     return candidate;
 }
 
-export function replayAfterErrorsNotice(workflowKind: WorkflowKind): string {
-    return `The previous /${workflowKind} run reported tool errors, but the agent later produced a completion. Replaying that completion now.`;
+export function replayAfterErrorsNotice(_workflowKind: WorkflowKind): string {
+    return "The previous /task run reported tool errors, but the agent later produced a completion. Replaying that completion now.";
 }
 
 export function completionReadyToMergeNotice(params: {
@@ -1873,7 +1869,7 @@ function loadWorkflow(root: string): {workflow: PersistedWorkflow} | {error: str
     const workflowPath = getWorkflowPath(root);
     if (!fs.existsSync(workflowPath)) {
         return {
-            error: `Missing workflow file: ${workflowPath}. Manual cleanup required: create a valid .tasks/workflow.json before running the matching /task or /fix command.`,
+            error: `Missing workflow file: ${workflowPath}. Manual cleanup required: create a valid .tasks/workflow.json before running /task.`,
         };
     }
 
@@ -1978,6 +1974,7 @@ type WorkflowIssueSummary = {
     title: string;
     created: string;
     parent: string | null;
+    labels: string[];
 };
 
 function toWorkflowIssueStatus(issue: Pick<GitHubIssueSummary, "state" | "labels">): WorkflowIssueStatus {
@@ -1993,6 +1990,7 @@ function toWorkflowIssueSummary(issue: GitHubIssueSummary): WorkflowIssueSummary
         title: issue.title,
         created: issue.createdAt,
         parent: issue.parent ? String(issue.parent.number) : null,
+        labels: [...issue.labels],
     };
 }
 
@@ -2268,11 +2266,23 @@ async function closeWorkflowIssue(
     }
 }
 
+export function validateStartableRootIssue(
+    issue: Pick<GitHubIssueSummary, "number" | "state" | "parent">,
+): {ok: true} | {error: string} {
+    if (issue.state !== "OPEN") {
+        return {error: `Issue #${issue.number} is no longer open`};
+    }
+    if (issue.parent) {
+        return {error: `Issue #${issue.number} is no longer a root issue`};
+    }
+    return {ok: true};
+}
+
 async function markWorkflowIssueInProgress(
     pi: ExtensionAPI,
     cwd: string,
     taskId: string,
-): Promise<{ok: true} | {ok: false; error: string}> {
+): Promise<{ok: true; issue: GitHubIssueSummary} | {ok: false; error: string}> {
     const issueNumber = parseIssueNumberFromTaskId(taskId);
     if (!issueNumber) {
         return {ok: false, error: `Invalid issue id: ${taskId}`};
@@ -2288,10 +2298,14 @@ async function markWorkflowIssueInProgress(
         if (!issue) {
             return {ok: false, error: `Issue #${issueNumber} not found`};
         }
+        const startable = validateStartableRootIssue(issue);
+        if ("error" in startable) {
+            return {ok: false, error: startable.error};
+        }
         await markIssueInProgressWithLabel(configResult.config, issue.id, IN_PROGRESS_LABEL);
-        return {ok: true};
+        return {ok: true, issue};
     } catch (error) {
-        return {ok: false, error: `Failed to mark issue #${issueNumber} in progress: ${error}`};
+        return {ok: false, error: `Failed to verify and mark issue #${issueNumber} in progress: ${error}`};
     }
 }
 
@@ -3560,7 +3574,7 @@ async function maybeNotifyPendingTransitionOutsideTaskLoop(
     }
 
     ctx.ui.notify(
-        `The agent has requested a transition outside the tool loop, please run /${workflow.workflow_kind} to continue.`,
+        "The agent has requested a transition outside the tool loop, please run /task to continue.",
         "warning",
     );
 }
@@ -3729,9 +3743,9 @@ export default function (pi: ExtensionAPI) {
         },
     });
 
-    pi.registerCommand("task", {
-        description: "Run the deterministic task workflow",
-        handler: async (args, ctx) => {
+    const taskCommand = {
+        description: "Run the deterministic task or fix workflow",
+        handler: async (args: string, ctx: ExtensionCommandContext) => {
             const trimmedArgs = (args ?? "").trim();
             const subcommand = trimmedArgs.split(/\s+/).filter(Boolean)[0]?.toLowerCase() ?? "";
             const subcommandArgs = subcommand ? trimmedArgs.slice(subcommand.length).trim() : "";
@@ -3760,18 +3774,13 @@ export default function (pi: ExtensionAPI) {
                     ctx.ui.notify(loadedKind.error, "error");
                     return;
                 }
-                const commandKind = validateWorkflowCommandKind("task", loadedKind.workflow.workflow_kind);
-                if ("error" in commandKind) {
-                    ctx.ui.notify(commandKind.error, "error");
-                    return;
-                }
                 if (subcommand === "lgtm") {
-                    const forced = await forceLGTM(pi, ctx, root, "task");
+                    const forced = await forceLGTM(pi, ctx, root);
                     if (!forced) {
                         return;
                     }
                 } else if (subcommand === "done") {
-                    const advanced = await markImplementationDone(pi, ctx, root, "task");
+                    const advanced = await markImplementationDone(pi, ctx, root);
                     if (!advanced) {
                         return;
                     }
@@ -3808,56 +3817,15 @@ export default function (pi: ExtensionAPI) {
                     ctx.ui.notify(`Unknown /task subcommand: ${subcommand}. Supported: delete`, "error");
                     return;
                 }
-                await runMainWorkspace(pi, ctx, root, "task");
+                await runMainWorkspace(pi, ctx, root);
             }
         },
-    });
+    };
 
+    pi.registerCommand("task", taskCommand);
     pi.registerCommand("fix", {
-        description: "Run the streamlined fix workflow",
-        handler: async (args, ctx) => {
-            const subcommand = (args ?? "").trim().split(/\s+/).filter(Boolean)[0]?.toLowerCase() ?? "";
-            for (const cmd of ["jj", "git"]) {
-                const result = await pi.exec("which", [cmd]);
-                if (result.code !== 0) {
-                    ctx.ui.notify(`Missing required command: ${cmd}`, "error");
-                    return;
-                }
-            }
-            const jjRootResult = await pi.exec("jj", ["root"]);
-            if (jjRootResult.code !== 0) {
-                ctx.ui.notify("Not in a jj workspace (jj root failed)", "error");
-                return;
-            }
-            const root = jjRootResult.stdout.trim();
-            if (isTaskWorkspace(root)) {
-                const loaded = loadWorkflow(root);
-                if ("error" in loaded) {
-                    ctx.ui.notify(loaded.error, "error");
-                    return;
-                }
-                const commandKind = validateWorkflowCommandKind("fix", loaded.workflow.workflow_kind);
-                if ("error" in commandKind) {
-                    ctx.ui.notify(commandKind.error, "error");
-                    return;
-                }
-                if (subcommand === "lgtm") {
-                    if (!await forceLGTM(pi, ctx, root, "fix")) return;
-                } else if (subcommand === "done") {
-                    if (!await markImplementationDone(pi, ctx, root, "fix")) return;
-                } else if (subcommand) {
-                    ctx.ui.notify(`Unknown /fix subcommand: ${subcommand}. Supported: lgtm, done`, "error");
-                    return;
-                }
-                await withTaskLoopGuard(() => runTaskWorkspace(pi, ctx, root));
-                return;
-            }
-            if (subcommand) {
-                ctx.ui.notify(`Unknown /fix subcommand: ${subcommand}. /fix has no apply or delete subcommand.`, "error");
-                return;
-            }
-            await runMainWorkspace(pi, ctx, root, "fix");
-        },
+        description: "Compatibility alias for /task",
+        handler: taskCommand.handler,
     });
 }
 
@@ -3902,10 +3870,9 @@ async function forceLGTM(
     pi: ExtensionAPI,
     ctx: ExtensionCommandContext,
     root: string,
-    commandKind: WorkflowKind,
 ): Promise<boolean> {
     if (!isTaskWorkspace(root)) {
-        ctx.ui.notify(`/${commandKind} lgtm is only supported in a workflow workspace.`, "error");
+        ctx.ui.notify("/task lgtm is only supported in a workflow workspace.", "error");
         return false;
     }
 
@@ -3930,7 +3897,7 @@ async function forceLGTM(
         return false;
     }
 
-    ctx.ui.notify(`/${commandKind} lgtm applied in ${workflow.state}.`, "info");
+    ctx.ui.notify(`/task lgtm applied in ${workflow.state}.`, "info");
     return true;
 }
 
@@ -3938,10 +3905,9 @@ async function markImplementationDone(
     pi: ExtensionAPI,
     ctx: ExtensionCommandContext,
     root: string,
-    commandKind: WorkflowKind,
 ): Promise<boolean> {
     if (!isTaskWorkspace(root)) {
-        ctx.ui.notify(`/${commandKind} done is only supported in a workflow workspace.`, "error");
+        ctx.ui.notify("/task done is only supported in a workflow workspace.", "error");
         return false;
     }
 
@@ -3978,8 +3944,18 @@ async function markImplementationDone(
         return false;
     }
 
-    ctx.ui.notify(`/${commandKind} done applied in ${workflow.state}.`, "info");
+    ctx.ui.notify(`/task done applied in ${workflow.state}.`, "info");
     return true;
+}
+
+export function validateTaskApplyWorkflow(
+    workflowKind: WorkflowKind,
+    state: MachineWorkflowState,
+): {ok: true} | {error: string} {
+    if (workflowKind === "task" && state === "review-plan") {
+        return {ok: true};
+    }
+    return {error: `/task apply is only valid in task review-plan; current workflow is ${workflowKind}:${state}.`};
 }
 
 async function applyReviewPlanFindings(
@@ -4001,8 +3977,9 @@ async function applyReviewPlanFindings(
     }
 
     const workflow = loaded.workflow;
-    if (workflow.state !== "review-plan") {
-        ctx.ui.notify(`/task apply is only valid in review-plan; current state is ${workflow.state}.`, "error");
+    const applicability = validateTaskApplyWorkflow(workflow.workflow_kind, workflow.state);
+    if ("error" in applicability) {
+        ctx.ui.notify(applicability.error, "error");
         return false;
     }
 
@@ -4163,7 +4140,6 @@ async function runMainWorkspace(
     pi: ExtensionAPI,
     ctx: ExtensionCommandContext,
     root: string,
-    workflowKind: WorkflowKind,
 ): Promise<void> {
     clearTaskUi(ctx);
 
@@ -4173,7 +4149,7 @@ async function runMainWorkspace(
     }
 
     // Select and start a new task
-    await selectAndStartTask(pi, ctx, root, workflowKind);
+    await selectAndStartTask(pi, ctx, root);
 }
 
 async function deleteTaskWorkspaceFromMain(
@@ -4438,7 +4414,7 @@ async function runTaskWorkspace(
         await waitForNewAssistantMessage(ctx, previousAssistantId);
 
         if (agentEndLooksLikeErrorFromSession(ctx)) {
-            ctx.ui.notify(`Agent turn ended with an error; fix the issue and run /${workflow.workflow_kind} to resume.`, "warning");
+            ctx.ui.notify("Agent turn ended with an error; fix the issue and run /task to resume.", "warning");
             return;
         }
 
@@ -4498,7 +4474,7 @@ async function runTaskWorkspace(
 
         if (!shouldContinue) {
             if (clearedPending.workflow.state === "manual-test") {
-                ctx.ui.notify(`Manual verification is still in progress. When it is complete, have the agent emit <transition>commit</transition> and then run /${workflow.workflow_kind} again.`, "info");
+                ctx.ui.notify("Manual verification is still in progress. When it is complete, have the agent emit <transition>commit</transition> and then run /task again.", "info");
             }
             return;
         }
@@ -4925,9 +4901,9 @@ function parseCreatedTimestamp(created?: string): number {
     return Number.isFinite(parsed) ? parsed : 0;
 }
 
-function formatReadyIssueLine(issue: ReadyIssue): string {
+export function formatReadyIssueLine(issue: ReadyIssue): string {
     const paddedId = issue.id.padEnd(8, " ");
-    return `${paddedId} [${issue.status}] - ${issue.title}`;
+    return `${paddedId} [${issue.status}] [${inferWorkflowKindFromLabels(issue.labels)}] - ${issue.title}`;
 }
 
 async function loadIssueMarkdown(pi: ExtensionAPI, cwd: string, id: string): Promise<{ content: string } | {
@@ -5133,7 +5109,6 @@ async function selectAndStartTask(
     pi: ExtensionAPI,
     ctx: ExtensionCommandContext,
     root: string,
-    workflowKind: WorkflowKind,
 ): Promise<void> {
     const readyIssues = await listReadyIssues(pi, ctx, root);
     if (!readyIssues) {
@@ -5165,8 +5140,8 @@ async function selectAndStartTask(
 
     const readyLines = selectableIssues.map((issue) => formatReadyIssueLine(issue));
 
-    // Let user select a task
-    const selection = await ctx.ui.select(`Select a ${workflowKind} to start:`, readyLines);
+    // Let the user select a root issue. Each line exposes the label-inferred kind.
+    const selection = await ctx.ui.select("Select an issue to start:", readyLines);
     if (!selection) {
         return;
     }
@@ -5180,11 +5155,11 @@ async function selectAndStartTask(
 
     // Extract title from the selection line (after " - ")
     const titleMatch = selection.match(/ - (.+)$/);
-    const issueTitle = titleMatch ? titleMatch[1] : issueId;
+    const selectedIssueTitle = titleMatch ? titleMatch[1] : issueId;
 
     // Create slug from title
-    const slugDefault = slugify(issueTitle);
-    const slugInput = await ctx.ui.editor(`${workflowKind === "fix" ? "Fix" : "Task"} slug:`, slugDefault);
+    const slugDefault = slugify(selectedIssueTitle);
+    const slugInput = await ctx.ui.editor("Workflow slug:", slugDefault);
     const slugResult = resolveEditorDialogValue(slugInput, slugDefault, {singleLine: true});
     if (slugResult.cancelled) {
         ctx.ui.notify("Task start cancelled.", "info");
@@ -5206,6 +5181,8 @@ async function selectAndStartTask(
         ctx.ui.notify(`Failed to set issue to in_progress: ${startResult.error}`, "error");
         return;
     }
+    const workflowKind = inferWorkflowKindFromLabels(startResult.issue.labels);
+    const issueTitle = startResult.issue.title;
 
     const parentDirectory = createTaskWorkspaceParentDirectory(wsPath);
     if (parentDirectory.ok === false) {

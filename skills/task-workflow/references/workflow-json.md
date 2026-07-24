@@ -152,7 +152,7 @@ Fix-only retry metadata:
 }
 ```
 
-The shell persists this before the single fix commit. If the commit succeeds but root closure or workflow persistence fails, `/fix` can verify the matching parent commit and resume finalization without creating a duplicate commit. Do not clear it while recovering a partially completed fix finalization unless you have verified the commit did not happen.
+The shell persists this before the single fix commit. If the commit succeeds but root closure or workflow persistence fails, `/task` can verify the matching parent commit and resume finalization without creating a duplicate commit. Do not clear it while recovering a partially completed fix finalization unless you have verified the commit did not happen.
 
 ### `manual_test_followups`
 
@@ -176,13 +176,13 @@ This records follow-up issues created by task `manual-test -> implement` or fix 
 
 Usually leave this alone.
 
-Only clear or change it if you intentionally want `/task` or `/fix` to try to replay an assistant completion that has not already been applied.
+Only clear or change it if you intentionally want `/task` to try to replay an assistant completion that has not already been applied.
 
 ### `session_leaf_id`
 
 This ties the workflow to a Pi conversation leaf.
 
-Prefer the built-in recovery first: the matching `/task` or `/fix` command can bind `unbound`, rebind an initial workflow, or prompt to update the leaf automatically when navigation fails.
+Prefer the built-in recovery first: `/task` can bind `unbound`, rebind an initial workflow, or prompt to update the leaf automatically when navigation fails.
 
 Manual edits are reasonable only when that recovery is otherwise blocked.
 

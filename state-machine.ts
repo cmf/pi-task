@@ -654,7 +654,7 @@ function transitionFix(snapshot: WorkflowSnapshot, event: WorkflowEvent): Transi
         return moveFix(snapshot, nextState, {type: "root"}, status, [{
             type: "ADD_NOTE",
             taskId: snapshot.rootTaskId,
-            note: "Forced LGTM via /fix lgtm (skipping review findings).",
+            note: "Forced LGTM via /task lgtm (skipping review findings).",
         }]);
     }
 

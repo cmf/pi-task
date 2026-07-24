@@ -5,6 +5,7 @@ import {
     createIssue,
     findChildIssueByExactTitle,
     GitHubGraphQLError,
+    getIssueByNumber,
     listIssues,
     listOpenRootIssues,
     type GitHubClientConfig,
@@ -184,6 +185,60 @@ test("listOpenRootIssues uses a lightweight open-issue query and filters child i
         const issues = await listOpenRootIssues(config, {pageSize: 10});
         assert.deepEqual(issues.map((issue) => issue.id), ["root-id"]);
         assert.doesNotMatch(query, /\n\s*body\s*\n/);
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+});
+
+test("getIssueByNumber paginates labels so exact workflow labels cannot be truncated", async () => {
+    const originalFetch = globalThis.fetch;
+    const firstLabels = Array.from({length: 50}, (_, index) => ({name: `label-${index}`}));
+    const requests: Array<{query: string; variables: Record<string, unknown>}> = [];
+    globalThis.fetch = (async (_input, init) => {
+        const request = JSON.parse(String(init?.body ?? "{}"));
+        requests.push(request);
+        const data = request.query.includes("query IssueLabels")
+            ? {
+                repository: {
+                    issue: {
+                        labels: {
+                            nodes: [{name: "FiX"}],
+                            pageInfo: {hasNextPage: false, endCursor: null},
+                        },
+                    },
+                },
+            }
+            : {
+                repository: {
+                    issue: {
+                        id: "issue-12",
+                        number: 12,
+                        title: "Fix parser",
+                        body: "",
+                        state: "OPEN",
+                        createdAt: "2026-07-24T00:00:00Z",
+                        closedAt: null,
+                        parent: null,
+                        labels: {
+                            nodes: firstLabels,
+                            pageInfo: {hasNextPage: true, endCursor: "label-cursor"},
+                        },
+                        comments: {
+                            nodes: [],
+                            pageInfo: {hasNextPage: false, endCursor: null},
+                        },
+                    },
+                },
+            };
+        return new Response(JSON.stringify({data}), {status: 200, headers: {"content-type": "application/json"}});
+    }) as typeof fetch;
+
+    try {
+        const issue = await getIssueByNumber(config, 12);
+        assert.equal(issue?.labels.length, 51);
+        assert.equal(issue?.labels.at(-1), "FiX");
+        assert.equal(requests.length, 2);
+        assert.equal(requests[1].variables.after, "label-cursor");
     } finally {
         globalThis.fetch = originalFetch;
     }

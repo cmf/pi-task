@@ -2,7 +2,7 @@
 
 ## Goal
 
-When `/task` or `/fix` creates a workflow workspace from inside a Herdr-managed pane, open a new Herdr workspace rooted at the new task/fix directory and start `pi` there. Herdr detection must take precedence over tmux and Ghostty because Herdr panes may inherit both terminal environments.
+When `/task` creates either kind of workflow workspace from inside a Herdr-managed pane, open a new Herdr workspace rooted at the new workflow directory and start `pi` there. Herdr detection must take precedence over tmux and Ghostty because Herdr panes may inherit both terminal environments.
 
 ## Current behavior
 
@@ -165,12 +165,12 @@ npm run typecheck
 Manual verification from inside Herdr:
 
 1. Confirm the current pane has `HERDR_ENV=1` and inherited Ghostty variables.
-2. Start a new `/task` or `/fix` from the main repository workspace.
+2. Start a new `/task` from the main repository workspace.
 3. Confirm a new Herdr workspace is created with the selected slug as its label.
 4. Confirm its root pane cwd is the new `~/.workspaces/<task-id>/<repo>` path.
 5. Confirm `pi` starts in that pane and Herdr detects it as a Pi agent.
 6. Confirm no separate Ghostty tab or tmux window is opened.
-7. Confirm `/task` or `/fix` in the new Pi session binds the initially unbound workflow leaf and proceeds normally.
+7. Confirm `/task` in the new Pi session binds the initially unbound workflow leaf and proceeds normally.
 
 Regression verification outside Herdr:
 

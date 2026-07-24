@@ -29,7 +29,7 @@ implementing the expansion.
 - Do not run or rely on browser, GUI, desktop, simulator, or end-to-end user
   flows before `manual-test`, including for debugging or smoke testing.
   Requested integration-test assets may be authored, but defer their execution.
-- Keep all changes uncommitted; `/fix` creates one final commit.
+- Keep all changes uncommitted; `/task` creates one final fix commit.
 - Maintain the active child `## Summary of Changes` section with targeted
   issue-editing tools.
 - Add or change root manual-test steps only to verify an explicit root

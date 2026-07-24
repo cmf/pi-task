@@ -61,6 +61,7 @@ type RawIssueNode = {
     } | null;
     labels?: {
         nodes?: Array<{name?: string | null} | null> | null;
+        pageInfo?: PageInfo;
     } | null;
 };
 
@@ -154,6 +155,65 @@ function getToken(config: GitHubClientConfig): string {
 
 function cacheKey(config: GitHubClientConfig): string {
     return `${config.endpoint ?? DEFAULT_ENDPOINT}::${config.owner}/${config.repo}`;
+}
+
+async function loadRemainingIssueLabels(
+    config: GitHubClientConfig,
+    issueNumber: number,
+    initialLabels: string[],
+    pageInfo?: PageInfo,
+): Promise<string[]> {
+    const labels = [...initialLabels];
+    let after = pageInfo?.hasNextPage ? pageInfo.endCursor : null;
+
+    while (after) {
+        const data = await graphql<{
+            repository: {
+                issue: {
+                    labels: {
+                        nodes?: Array<{name?: string | null} | null> | null;
+                        pageInfo: PageInfo;
+                    };
+                } | null;
+            } | null;
+        }>(
+            config,
+            `query IssueLabels($owner: String!, $repo: String!, $number: Int!, $after: String) {
+                repository(owner: $owner, name: $repo) {
+                    issue(number: $number) {
+                        labels(first: 100, after: $after) {
+                            nodes {
+                                name
+                            }
+                            pageInfo {
+                                hasNextPage
+                                endCursor
+                            }
+                        }
+                    }
+                }
+            }`,
+            {owner: config.owner, repo: config.repo, number: issueNumber, after},
+        );
+
+        const connection = data.repository?.issue?.labels;
+        if (!connection) break;
+        labels.push(...(connection.nodes ?? [])
+            .map((item) => item?.name?.trim() ?? "")
+            .filter(Boolean));
+        after = connection.pageInfo.hasNextPage ? connection.pageInfo.endCursor : null;
+    }
+
+    return labels;
+}
+
+async function mapIssueNodeWithCompleteLabels(
+    config: GitHubClientConfig,
+    node: RawIssueNode,
+): Promise<GitHubIssueSummary> {
+    const summary = mapIssueNode(node);
+    summary.labels = await loadRemainingIssueLabels(config, node.number, summary.labels, node.labels?.pageInfo);
+    return summary;
 }
 
 function mapIssueNode(node: RawIssueNode): GitHubIssueSummary {
@@ -350,6 +410,10 @@ export async function getIssueByNumber(
                         nodes {
                             name
                         }
+                        pageInfo {
+                            hasNextPage
+                            endCursor
+                        }
                     }
                     comments(first: $commentsFirst) {
                         nodes {
@@ -381,7 +445,7 @@ export async function getIssueByNumber(
         return null;
     }
 
-    const summary = mapIssueNode(issueNode);
+    const summary = await mapIssueNodeWithCompleteLabels(config, issueNode);
     const comments = (issueNode.comments?.nodes ?? [])
         .filter((node): node is NonNullable<typeof node> => Boolean(node))
         .map((node) => ({
@@ -685,11 +749,13 @@ export async function listOpenRootIssues(
                                 number
                                 title
                             }
-                            # Labels are intentionally capped at 50; workflow status uses a single
-                            # controlled label, so exceeding this cap is not expected in practice.
                             labels(first: 50) {
                                 nodes {
                                     name
+                                }
+                                pageInfo {
+                                    hasNextPage
+                                    endCursor
                                 }
                             }
                         }
@@ -715,10 +781,10 @@ export async function listOpenRootIssues(
         }
 
         const issues = repository.issues;
-        const mapped = (issues.nodes ?? [])
+        const rootNodes = (issues.nodes ?? [])
             .filter((node: RawIssueNode | null): node is RawIssueNode => Boolean(node))
-            .filter((node: RawIssueNode) => !node.parent)
-            .map((node: RawIssueNode) => mapIssueNode(node));
+            .filter((node: RawIssueNode) => !node.parent);
+        const mapped = await Promise.all(rootNodes.map((node) => mapIssueNodeWithCompleteLabels(config, node)));
         items.push(...mapped);
 
         if (!issues.pageInfo.hasNextPage || !issues.pageInfo.endCursor) {
