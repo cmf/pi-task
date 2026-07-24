@@ -15,9 +15,12 @@ Otherwise:
   user-visible root requirements and critical paths. Do not add exploratory
   scenarios, internal invariants, or adversarial conditions better covered by
   automated tests.
-- Run only non-interactive code-level checks yourself. The user must perform
-  browser, GUI, desktop, and end-to-end user flows.
-- Present the checklist and ask the user to confirm the result.
+- Run non-interactive code-level checks yourself. By default, the user performs
+  browser, GUI, desktop, and end-to-end user flows, but you may perform them
+  when the user explicitly asks and the available tools support them.
+- Present the checklist, clearly distinguish checks you performed from checks
+  requiring user confirmation, and ask the user to confirm the remaining
+  results.
 - On confirmed success, output `<transition>commit</transition>`.
 
 If verification fails, stop and classify the fresh failure before proposing
@@ -32,18 +35,32 @@ work. State:
 - the smallest fix shape and material trade-offs only when it is an in-scope
   implementation failure.
 
-Create follow-up work only for a reproducible failure of an explicit root
+After classification, record concise observed/expected behavior and reproduction
+notes in the root `## Manual Verification` section. Recording a test result is
+documentation, not creation of implementation work, and does not require
+separate approval.
+
+A failure does not by itself end the current verification session. If the user
+wants to collect failures, continue with later independent checks after
+recording and classifying the result. Stop only when the failure prevents later
+checks from running, makes their results unreliable, or continuing could cause
+destructive or unsafe behavior. Do not emit transition tags merely because a
+failure was recorded.
+
+After the session is complete or reaches a genuinely blocking failure,
+summarize the collected failures and identify which qualify for implementation
+work. Create follow-up work only for a reproducible failure of an explicit root
 requirement, a material regression introduced by this fix, or a concrete
 correctness, data-loss, compatibility, or security defect on an execution path
 required by the root issue. Do not create follow-up work for setup problems,
 incorrect test steps, flaky results, adjacent pre-existing defects, or behavior
-outside the root scope. Ask the user whether to create implementation work and
-emit no tags until they explicitly approve.
+outside the root scope. Ask once whether to create follow-ups for the qualifying
+failures. Do not create implementation work or emit transition tags until the
+user explicitly approves the selected failures. This approval is required for
+follow-up creation, not for recording failures or continuing independent
+verification.
 
-Only after approval:
-
-1. Update root `## Manual Verification` with concise failure/repro notes.
-2. Output a non-empty YAML list:
+Only after approval, output a non-empty YAML list:
 
 <manual-test-subtasks>
 - title: "Fix observed manual-test failure"
@@ -64,8 +81,12 @@ what minimum manual verification is required; stop without tags. Every approved
 steps or required root-plan update.
 
 Manual testing remains pending after follow-ups. After implementation and
-review, rerun the failed step, directly affected steps, and relevant
-critical-path checks, as well as any remaining tests subsequent to the failing 
-case. Require a complete rerun only when the correction has
-broad effects or invalidates earlier results. Do not create duplicate follow-ups
-listed in the injected previous-follow-up context.
+review, rerun each failed step, directly affected steps, and relevant
+critical-path checks. Require a complete rerun only when a correction has broad
+effects or invalidates earlier results. Checks completed before a failure need
+not be repeated unless affected. Later checks collected during the original
+verification session remain valid unless a fix could affect them. Never
+transition to `commit` while a required in-scope check remains unresolved or
+unverified; you may continue collecting results from independent checks as
+described above. Do not create duplicate follow-ups listed in the injected
+previous-follow-up context.
