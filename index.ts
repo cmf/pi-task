@@ -3565,16 +3565,12 @@ async function maybeNotifyPendingTransitionOutsideTaskLoop(
     );
 }
 
-function taskIssueEditError(reason: string, extraDetails?: Record<string, unknown>) {
-    return {
-        content: [{type: "text" as const, text: reason}],
-        isError: true,
-        details: {
-            ok: false,
-            reason,
-            ...(extraDetails ?? {}),
-        },
-    };
+function taskIssueEditError(reason: string, extraDetails?: Record<string, unknown>): Error {
+    if (!extraDetails || Object.keys(extraDetails).length === 0) {
+        return new Error(reason);
+    }
+
+    return new Error(`${reason} Details: ${JSON.stringify(extraDetails)}`);
 }
 
 async function executeTaskIssueBodyEditTool(
@@ -3585,28 +3581,28 @@ async function executeTaskIssueBodyEditTool(
 ) {
     const jjRootResult = await pi.exec("jj", ["root"], {cwd: ctx.cwd});
     if (jjRootResult.code !== 0) {
-        return taskIssueEditError("Not in a jj workspace (jj root failed)", {
+        throw taskIssueEditError("Not in a jj workspace (jj root failed)", {
             stderr: jjRootResult.stderr,
         });
     }
 
     const root = jjRootResult.stdout.trim();
     if (!root || !isTaskWorkspace(root)) {
-        return taskIssueEditError(`${tool} can only be used inside a task workspace (~/.workspaces/<task-id>/<repo>).`, {
+        throw taskIssueEditError(`${tool} can only be used inside a task workspace (~/.workspaces/<task-id>/<repo>).`, {
             root,
         });
     }
 
     const loadedWorkflow = loadWorkflow(root);
     if ("error" in loadedWorkflow) {
-        return taskIssueEditError(loadedWorkflow.error);
+        throw taskIssueEditError(loadedWorkflow.error);
     }
 
     const workflow = loadedWorkflow.workflow;
     const taskId = input.target === "root" ? workflow.task_id : workflow.active_task_id;
     const issueNumber = parseIssueNumberFromTaskId(taskId);
     if (!issueNumber) {
-        return taskIssueEditError(
+        throw taskIssueEditError(
             `Cannot map workflow task id "${taskId}" to a GitHub issue number. ` +
             "Supported forms: 123, #123, owner/repo#123, or GitHub issue URL.",
             {taskId},
@@ -3615,7 +3611,7 @@ async function executeTaskIssueBodyEditTool(
 
     const githubConfigResult = await resolveGitHubClientConfig(pi, root);
     if ("error" in githubConfigResult) {
-        return taskIssueEditError(githubConfigResult.error);
+        throw taskIssueEditError(githubConfigResult.error);
     }
 
     const config = githubConfigResult.config;
@@ -3623,7 +3619,7 @@ async function executeTaskIssueBodyEditTool(
     try {
         const issue = await getIssueByNumber(config, issueNumber);
         if (!issue) {
-            return taskIssueEditError(`Issue #${issueNumber} not found in ${config.owner}/${config.repo}.`, {
+            throw taskIssueEditError(`Issue #${issueNumber} not found in ${config.owner}/${config.repo}.`, {
                 target: input.target,
                 issueNumber,
             });
@@ -3675,7 +3671,7 @@ async function executeTaskIssueBodyEditTool(
             },
         };
     } catch (error) {
-        return taskIssueEditError(`${tool} failed: ${error}`);
+        throw taskIssueEditError(`${tool} failed: ${error}`);
     }
 }
 

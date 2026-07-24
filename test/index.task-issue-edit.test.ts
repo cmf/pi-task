@@ -374,6 +374,39 @@ test("default export registers task and fix commands plus the three targeted iss
     assert.match(descriptions, /without `##` headers/i);
 });
 
+test("targeted issue tool execute failures are thrown for pi 0.82", async () => {
+    const tools: Array<{name: string; execute: (...args: never[]) => Promise<unknown>}> = [];
+    const pi = {
+        on() {},
+        registerCommand() {},
+        registerTool(tool: {name: string; execute: (...args: never[]) => Promise<unknown>}) {
+            tools.push(tool);
+        },
+        exec: async () => ({code: 1, stdout: "", stderr: "workspace lookup failed"}),
+    };
+
+    taskExtension(pi as never);
+
+    for (const tool of tools) {
+        await assert.rejects(
+            () => tool.execute(
+                "call-1" as never,
+                {target: "root"} as never,
+                undefined as never,
+                undefined as never,
+                {cwd: "/tmp/not-a-workspace"} as never,
+            ),
+            (error) => {
+                assert.ok(error instanceof Error);
+                assert.match(error.message, /Not in a jj workspace/);
+                assert.match(error.message, /workspace lookup failed/);
+                return true;
+            },
+            tool.name,
+        );
+    }
+});
+
 test("computeTaskIssueEditBody maps targeted tool inputs to issue body edits", () => {
     const body = [
         "Intro old",
