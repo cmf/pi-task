@@ -1366,9 +1366,14 @@ function taskIssueSectionHeader(section: TaskIssueSection): string {
     return TASK_ISSUE_SECTION_HEADERS[section];
 }
 
-export function buildTaskBranchRevsetFromTaskHeadCommit(taskHeadCommitId: string): string {
+export function buildTaskBranchRevsetFromTaskHeadCommit(
+    taskHeadCommitId: string,
+    mainHeadCommitId?: string,
+): string {
     const commitId = taskHeadCommitId.trim();
-    return `(::commit_id(${commitId}) ~ ::fork_point(commit_id(${commitId}) | @-)) & ~empty()`;
+    const mainHead = mainHeadCommitId?.trim();
+    const mainSelector = mainHead ? `commit_id(${mainHead})` : "@-";
+    return `(::commit_id(${commitId}) ~ ::fork_point(commit_id(${commitId}) | ${mainSelector})) & ~empty()`;
 }
 
 type TaskNode = {
@@ -4144,8 +4149,15 @@ async function runMainWorkspace(
     clearTaskUi(ctx);
 
     // Loop: merge completed workspaces
-    while (await maybeMergeCompletedWorkspace(pi, ctx, root)) {
-        // Continue merging until none left or user skips
+    while (true) {
+        const mergeResult = await maybeMergeCompletedWorkspace(pi, ctx, root);
+        if (mergeResult === "merged") {
+            continue;
+        }
+        if (mergeResult === "blocked") {
+            return;
+        }
+        break;
     }
 
     // Select and start a new task
@@ -4507,8 +4519,8 @@ async function runTaskPrompt(
 }
 
 /**
- * Check for completed task workspaces and offer to merge one
- * Returns true if a merge happened (so caller can loop)
+ * Check for completed task workspaces and offer to merge one.
+ * Reports whether the caller should continue after a merge, stop on an error, or move on.
  */
 async function workspaceReadyToMergeFromWorkflow(
     wsPath: string,
@@ -4537,26 +4549,28 @@ async function workspaceReadyToMergeFromWorkflow(
     }
 }
 
+type MainWorkspaceMergeResult = "merged" | "blocked" | "none";
+
 async function maybeMergeCompletedWorkspace(
     pi: ExtensionAPI,
     ctx: ExtensionCommandContext,
     root: string
-): Promise<boolean> {
+): Promise<MainWorkspaceMergeResult> {
     const workspaceNames = await listWorkspaceNames(pi, ctx);
     if (workspaceNames.length === 0) {
-        return false;
+        return "none";
     }
 
     const repo = path.basename(root);
     const mainCommitId = await getMainWorkspaceCommitId(pi, ctx);
     if (!mainCommitId) {
-        return false;
+        return "blocked";
     }
 
     const githubConfigResult = await resolveGitHubClientConfig(pi, root);
     if ("error" in githubConfigResult) {
         ctx.ui.notify(`Failed to verify merge readiness from GitHub: ${githubConfigResult.error}`, "error");
-        return false;
+        return "blocked";
     }
 
     const mergeableWorkspaces: Array<{ name: string; wsPath: string }> = [];
@@ -4584,7 +4598,7 @@ async function maybeMergeCompletedWorkspace(
     }
 
     if (mergeableWorkspaces.length === 0) {
-        return false;
+        return "none";
     }
 
     const choices = mergeableWorkspaces.map((ws) => ws.name);
@@ -4596,12 +4610,12 @@ async function maybeMergeCompletedWorkspace(
     );
 
     if (!selection || selection === "Skip merge") {
-        return false;
+        return "none";
     }
 
     const selected = mergeableWorkspaces.find((ws) => ws.name === selection);
     if (!selected) {
-        return false;
+        return "none";
     }
 
     const confirmMerge = await ctx.ui.confirm(
@@ -4610,15 +4624,22 @@ async function maybeMergeCompletedWorkspace(
     );
 
     if (!confirmMerge) {
-        return false;
+        return "none";
     }
 
-    const mergeSuccess = await mergeDoneTaskWorkspace(pi, ctx, root, selected.name, selected.wsPath);
-    if (!mergeSuccess) {
-        return false;
+    const mergeResult = await mergeDoneTaskWorkspace(pi, ctx, root, selected.name, selected.wsPath);
+    if (mergeResult.kind === "failed") {
+        return "blocked";
     }
 
-    ctx.ui.notify(`Merged workspace: ${selected.name}`, "info");
+    if (mergeResult.hadConflicts) {
+        ctx.ui.notify(
+            `Merged workspace ${selected.name} into main with conflicts. The merge is recorded normally; resolve the conflicts when convenient.`,
+            "warning",
+        );
+    } else {
+        ctx.ui.notify(`Merged workspace: ${selected.name}`, "info");
+    }
 
     const confirmDelete = await ctx.ui.confirm(
         "Delete workspace?",
@@ -4632,7 +4653,107 @@ async function maybeMergeCompletedWorkspace(
         }
     }
 
-    return true;
+    return "merged";
+}
+
+type TaskBranchMergeResult = {kind: "merged"; hadConflicts: boolean} | {error: string};
+type TaskBranchMergeExecResult = {code: number; stdout: string; stderr: string};
+type TaskBranchMergeExec = (
+    args: string[],
+    options: {cwd: string},
+) => Promise<TaskBranchMergeExecResult>;
+
+function taskMergeError(result: TaskBranchMergeExecResult): string {
+    return result.stderr.trim() || result.stdout.trim() || "unknown error";
+}
+
+async function abandonMergeDestination(
+    exec: TaskBranchMergeExec,
+    root: string,
+    destinationRevset: string,
+): Promise<string | null> {
+    const result = await exec(["abandon", destinationRevset], {cwd: root});
+    return result.code === 0 ? null : taskMergeError(result);
+}
+
+export async function mergeTaskBranchOntoMain(params: {
+    root: string;
+    taskHeadCommitId: string;
+    message: string;
+    destinationMarker?: string;
+    exec: TaskBranchMergeExec;
+}): Promise<TaskBranchMergeResult> {
+    const mainHeadResult = await params.exec([
+        "log", "-r", "@-", "-T", "commit_id", "--no-graph", "--limit", "1",
+    ], {cwd: params.root});
+    const mainHeadCommitId = mainHeadResult.stdout.trim();
+    if (mainHeadResult.code !== 0 || !mainHeadCommitId) {
+        return {error: `Failed to read main workspace head: ${taskMergeError(mainHeadResult)}`};
+    }
+
+    const marker = params.destinationMarker
+        ?? `pi-task-merge-destination-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    if (!/^[A-Za-z0-9-]+$/.test(marker)) {
+        return {error: `Invalid merge destination marker: ${marker}`};
+    }
+
+    const mainHeadSelector = `commit_id(${mainHeadCommitId})`;
+    const markerRevset = `children(${mainHeadSelector}) & subject(exact:"${marker}")`;
+    const created = await params.exec([
+        "new", "--no-edit", "-m", marker, mainHeadSelector,
+    ], {cwd: params.root});
+    if (created.code !== 0) {
+        return {error: `Failed to create detached merge destination: ${taskMergeError(created)}`};
+    }
+
+    const destinationResult = await params.exec([
+        "log", "-r", markerRevset, "-T", "change_id ++ \"\\n\"", "--no-graph", "--limit", "2",
+    ], {cwd: params.root});
+    const destinationChangeIds = destinationResult.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    if (destinationResult.code !== 0 || destinationChangeIds.length !== 1) {
+        const cleanupError = await abandonMergeDestination(params.exec, params.root, markerRevset);
+        const details = destinationResult.code !== 0
+            ? taskMergeError(destinationResult)
+            : `expected one destination, found ${destinationChangeIds.length}`;
+        return {
+            error: `Failed to identify detached merge destination: ${details}${cleanupError ? `. Cleanup also failed: ${cleanupError}` : ""}`,
+        };
+    }
+
+    const destinationChangeId = destinationChangeIds[0];
+    const destinationSelector = `change_id(${destinationChangeId})`;
+    const taskBranchRevset = buildTaskBranchRevsetFromTaskHeadCommit(
+        params.taskHeadCommitId,
+        mainHeadCommitId,
+    );
+    const squashed = await params.exec([
+        "squash", "--into", destinationSelector, "-m", params.message, "--from", taskBranchRevset,
+    ], {cwd: params.root});
+    if (squashed.code !== 0) {
+        const cleanupError = await abandonMergeDestination(params.exec, params.root, destinationSelector);
+        return {
+            error: `Squash merge failed: ${taskMergeError(squashed)}${cleanupError ? `. Cleanup also failed: ${cleanupError}` : ""}`,
+        };
+    }
+
+    const conflictResult = await params.exec([
+        "log", "-r", `${destinationSelector} & conflicts()`, "-T", "commit_id", "--no-graph", "--limit", "1",
+    ], {cwd: params.root});
+    if (conflictResult.code !== 0) {
+        return {
+            error: `Merge commit was created as ${destinationChangeId}, but conflict inspection failed: ${taskMergeError(conflictResult)}`,
+        };
+    }
+
+    const hadConflicts = Boolean(conflictResult.stdout.trim());
+    const advanced = await params.exec(["new", "-m", "", destinationSelector], {cwd: params.root});
+    if (advanced.code !== 0) {
+        return {
+            error: `Merge commit ${destinationChangeId} was created, but main could not advance to it: ${taskMergeError(advanced)}`,
+        };
+    }
+
+    return {kind: "merged", hadConflicts};
 }
 
 /**
@@ -4644,16 +4765,16 @@ async function mergeDoneTaskWorkspace(
     root: string,
     name: string,
     wsPath: string
-): Promise<boolean> {
+): Promise<{kind: "merged"; hadConflicts: boolean} | {kind: "failed"}> {
     // Refuse to merge if the main workspace has pending changes.
     const mainDiff = await pi.exec("jj", ["diff"], {cwd: root});
     if (mainDiff.code !== 0) {
         ctx.ui.notify(`Failed to check main workspace diff: ${mainDiff.stderr}`, "error");
-        return false;
+        return {kind: "failed"};
     }
     if (mainDiff.stdout.trim().length > 0) {
         ctx.ui.notify("Main workspace has uncommitted changes; commit or discard them before merging a task workspace.", "error");
-        return false;
+        return {kind: "failed"};
     }
 
     // Find the latest non-empty commit in the task workspace.
@@ -4678,7 +4799,7 @@ async function mergeDoneTaskWorkspace(
     const taskHeadCommitId = taskHeadResult.stdout.trim();
     if (taskHeadResult.code !== 0 || !taskHeadCommitId) {
         ctx.ui.notify(`Failed to find task head commit for ${name}`, "error");
-        return false;
+        return {kind: "failed"};
     }
 
     // Revset of all non-empty commits that are part of the task branch relative to current main @-.
@@ -4693,11 +4814,11 @@ async function mergeDoneTaskWorkspace(
     );
     if (hasTaskCommits.code !== 0) {
         ctx.ui.notify(`Failed to inspect task commits for ${name}: ${hasTaskCommits.stderr}`, "error");
-        return false;
+        return {kind: "failed"};
     }
     if (!hasTaskCommits.stdout.trim()) {
         ctx.ui.notify(`No non-empty task commits found to merge for ${name}`, "warning");
-        return false;
+        return {kind: "failed"};
     }
 
     // Default squash message to the description of the latest non-empty task commit.
@@ -4732,25 +4853,23 @@ async function mergeDoneTaskWorkspace(
     const messageResult = resolveEditorDialogValue(messageInput, defaultMessage);
     if (messageResult.cancelled) {
         ctx.ui.notify("Squash merge cancelled.", "info");
-        return false;
+        return {kind: "failed"};
     }
     const message = messageResult.value;
 
-    // Create a single squashed commit after @- containing all task changes.
-    // `-A @-` also rebases children of @- (including @) onto the new squashed commit,
-    // so we don't need a separate rebase step.
-    ctx.ui.notify("squash-merge: creating squashed commit on main (insert-after @-)", "info");
-    const squashResult = await pi.exec(
-        "jj",
-        ["squash", "-A", "@-", "-m", message, "--from", taskBranchRevset],
-        {cwd: root},
-    );
-    if (squashResult.code !== 0) {
-        ctx.ui.notify(`Squash merge failed: ${squashResult.stderr}`, "error");
-        return false;
+    ctx.ui.notify("squash-merge: creating detached squashed commit on main", "info");
+    const mergeResult = await mergeTaskBranchOntoMain({
+        root,
+        taskHeadCommitId,
+        message,
+        exec: (args, options) => pi.exec("jj", args, options),
+    });
+    if ("error" in mergeResult) {
+        ctx.ui.notify(mergeResult.error, "error");
+        return {kind: "failed"};
     }
 
-    return true;
+    return mergeResult;
 }
 
 async function listWorkspaceNames(

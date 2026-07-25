@@ -13,7 +13,7 @@ Finalize the root fix as one commit.
 4. Do not commit or close the issue yourself; the extension performs those
    actions only after validating the output.
 
-Output only a multiline commit message:
+Output only a multiline commit message in `<commit-message>...</commit-message>` tags:
 
 <commit-message>
 Fix concise user-facing problem

@@ -20,7 +20,7 @@ in tool content, ask the user to edit issues, or perform lifecycle actions.
 
 ## Output
 
-Output only a commit message in:
+Output only a commit message in `<commit-message>...</commit-message>` tags:
 
 ```md
 <commit-message>
